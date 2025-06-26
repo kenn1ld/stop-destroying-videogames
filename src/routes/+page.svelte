@@ -20,6 +20,7 @@
   const progression = writable<Progression>({ signatureCount: 0, goal: 1 });
   const initiative  = writable<InitiativeInfo>({ registrationDate: '', closingDate: '' });
   const error       = writable<string | null>(null);
+  const lastUpdate  = writable<number>(0);
 
   // history of ticks - now using server-side storage
   const history = writable<Tick[]>([]);
@@ -127,8 +128,26 @@
     }
   );
 
+  // Derive time-based projections
+  const projections = derived([rate, progression], ([$rate, $prog]) => {
+    const sigsLeft = $prog.goal - $prog.signatureCount;
+    
+    return {
+      timeToGoal: {
+        atCurrentRate: $rate.perDay > 0 ? Math.ceil(sigsLeft / $rate.perDay) : Infinity,
+        atNeededRate: Math.ceil(sigsLeft / 13071) // based on current daily quota
+      },
+      projectedCompletion: {
+        current: $rate.perDay > 0 ? new Date(Date.now() + (sigsLeft / $rate.perDay) * MS_PER_DAY) : null,
+        needed: new Date(Date.now() + (sigsLeft / 13071) * MS_PER_DAY)
+      }
+    };
+  });
+
   // ─── POLLING WITH RAILWAY BACKEND ────────────────────────────────────────
   let handle: ReturnType<typeof setInterval>;
+  let reconnectAttempts = 0;
+  const MAX_RECONNECT_ATTEMPTS = 5;
 
   onMount(() => {
     if (!browser) return;
@@ -149,6 +168,7 @@
       if (response.ok) {
         const serverHistory = await response.json();
         history.set(serverHistory);
+        reconnectAttempts = 0; // Reset on successful connection
       }
     } catch (e) {
       console.error('Failed to load history from server:', e);
@@ -164,13 +184,21 @@
 
   async function saveTickToServer(ts: number, count: number) {
     try {
-      await fetch('/api/tick', {
+      const response = await fetch('/api/tick', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ts, count })
       });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      reconnectAttempts = 0; // Reset on successful save
     } catch (e) {
       console.error('Failed to save tick to server:', e);
+      reconnectAttempts++;
+      
       // Fallback to localStorage for development
       try {
         history.update(h => {
@@ -180,6 +208,13 @@
         });
       } catch (localErr) {
         console.error('Failed to save to localStorage:', localErr);
+      }
+      
+      // If too many failures, try to reload history
+      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        console.log('Too many failures, attempting to reload history...');
+        await loadHistory();
+        reconnectAttempts = 0;
       }
     }
   }
@@ -197,6 +232,7 @@
         closingDate:      infoJson.initiativeInfo.closingDate
       });
       error.set(null);
+      lastUpdate.set(Date.now());
       
       const nowTs = Date.now();
       
@@ -206,6 +242,7 @@
       
     } catch (e) {
       error.set((e as Error).message);
+      console.error('Tick error:', e);
     }
   }
 
@@ -223,14 +260,74 @@
     if (dataPoints >= threshold.ok) return '⚠️';
     return '⏳';
   }
+
+  function formatDuration(days: number): string {
+    if (days === Infinity) return 'Never at current rate';
+    if (days > 365) return `${Math.ceil(days / 365)} years`;
+    if (days > 30) return `${Math.ceil(days / 30)} months`;
+    if (days > 7) return `${Math.ceil(days / 7)} weeks`;
+    return `${Math.ceil(days)} days`;
+  }
+
+  function formatDate(date: Date | null): string {
+    if (!date) return 'Unknown';
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric', 
+      year: 'numeric' 
+    });
+  }
+
+  function getConnectionStatus(): string {
+    if (reconnectAttempts > 0) return '🔄 Reconnecting...';
+    const timeSinceUpdate = Date.now() - $lastUpdate;
+    if (timeSinceUpdate > 10000) return '⚠️ Connection issue';
+    return '🟢 Live';
+  }
+
+  // Share functionality
+  function shareApp() {
+    if (navigator.share) {
+      navigator.share({
+        title: 'Stop Destroying Videogames - Live Tracker',
+        text: `${$progression.signatureCount.toLocaleString()} signatures so far! Track the progress live.`,
+        url: window.location.href
+      }).catch(console.error);
+    } else {
+      // Fallback: copy to clipboard
+      navigator.clipboard.writeText(window.location.href).then(() => {
+        alert('Link copied to clipboard!');
+      }).catch(() => {
+        alert(`Share this link: ${window.location.href}`);
+      });
+    }
+  }
 </script>
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-6">
   <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-8 space-y-6">
-    <h1 class="text-center text-4xl font-bold text-gray-900 dark:text-gray-100">Stop Destroying Videogames</h1>
+    <!-- Header with connection status -->
+    <div class="flex items-center justify-between">
+      <h1 class="text-3xl font-bold text-gray-900 dark:text-gray-100">Stop Destroying Videogames</h1>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-gray-500">{getConnectionStatus()}</span>
+        <button 
+          on:click={shareApp}
+          class="p-2 text-gray-500 hover:text-blue-600 transition-colors"
+          title="Share this tracker"
+        >
+          📤
+        </button>
+      </div>
+    </div>
 
     {#if $error}
-      <p class="text-center text-red-600 dark:text-red-400">Error: {$error}</p>
+      <div class="text-center p-4 bg-red-50 dark:bg-red-900/20 rounded-lg">
+        <p class="text-red-600 dark:text-red-400">Error: {$error}</p>
+        <p class="text-xs text-red-500 dark:text-red-300 mt-1">
+          Retrying... ({reconnectAttempts}/{MAX_RECONNECT_ATTEMPTS})
+        </p>
+      </div>
     {:else}
       <!-- Live Rates with Confidence Indicators -->
       <div class="grid grid-cols-2 gap-4 text-sm text-gray-700 dark:text-gray-300">
@@ -264,6 +361,25 @@
         </div>
       </div>
 
+      <!-- Projections (only show if daily rate is reliable) -->
+      {#if $rate.dataPoints.perDay >= 100}
+        <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 space-y-2">
+          <h3 class="font-semibold text-blue-900 dark:text-blue-100 text-sm">📊 Projections</h3>
+          <div class="grid grid-cols-2 gap-4 text-xs text-blue-800 dark:text-blue-200">
+            <div>
+              <div class="font-medium">At current rate:</div>
+              <div>{formatDuration($projections.timeToGoal.atCurrentRate)}</div>
+              <div class="text-blue-600 dark:text-blue-300">{formatDate($projections.projectedCompletion.current)}</div>
+            </div>
+            <div>
+              <div class="font-medium">If quota met daily:</div>
+              <div>{formatDuration($projections.timeToGoal.atNeededRate)}</div>
+              <div class="text-blue-600 dark:text-blue-300">{formatDate($projections.projectedCompletion.needed)}</div>
+            </div>
+          </div>
+        </div>
+      {/if}
+
       <!-- Data Quality Indicator -->
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
         Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
@@ -271,15 +387,26 @@
 
       <!-- Today's Stats -->
       <div class="grid grid-cols-3 gap-4 text-sm text-gray-700 dark:text-gray-300 text-center">
-        <div>Collected:<br><strong>{$todayData.collected.toLocaleString()}</strong></div>
-        <div>Met todays quota?:<br>
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Collected Today</div>
+          <strong class="text-lg">{$todayData.collected.toLocaleString()}</strong>
+        </div>
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Daily Quota</div>
           {#if $todayData.baselineKnown}
-            {#if $metToday}✅ Met{:else}❌ Not met{/if}
+            {#if $metToday}
+              <span class="text-green-600 dark:text-green-400 font-semibold">✅ Met</span>
+            {:else}
+              <span class="text-red-600 dark:text-red-400 font-semibold">❌ Not met</span>
+            {/if}
           {:else}
-            ❓ Unknown (no baseline)
+            <span class="text-yellow-600 dark:text-yellow-400 font-semibold">❓ Unknown</span>
           {/if}
         </div>
-        <div>Ticks:<br><strong>{$history.length}</strong></div>
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Data Points</div>
+          <strong class="text-lg">{$history.length}</strong>
+        </div>
       </div>
 
       <!-- Original Progress & Time UI -->
@@ -334,6 +461,18 @@
           <span>✅ Reliable</span>
           <span>⚠️ Stabilizing</span>
           <span>⏳ Warming up</span>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
+        <div>Live tracker • Updates every second</div>
+        <div class="mt-1">
+          <a href="https://citizens-initiative.europa.eu/initiatives/details/2024/000045_en" 
+             target="_blank" 
+             class="text-blue-500 hover:text-blue-600 transition-colors">
+            Sign the petition →
+          </a>
         </div>
       </div>
     {/if}
