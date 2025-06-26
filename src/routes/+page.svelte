@@ -10,10 +10,31 @@
 
   // ─── HELPERS ─────────────────────────────────────────────────────────────
   const MS_PER_DAY = 1000 * 60 * 60 * 24;
+  
   function parseEUDate(input: string) {
     const [d, m, y] = input.split('/').map(Number);
     return new Date(y, m - 1, d);
   }
+  
+  // UTC helper functions for consistent global timing
+  function getUTCStartOfDay(date: Date = new Date()): number {
+    return new Date(Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(), 
+      date.getUTCDate()
+    )).getTime();
+  }
+  
+  function formatUTCDate(timestamp: number): string {
+    const date = new Date(timestamp);
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric', 
+      year: 'numeric',
+      timeZone: 'UTC'
+    }) + ' UTC';
+  }
+  
   const HISTORY_KEY = 'eci-history';
 
   // ─── STORES ───────────────────────────────────────────────────────────────
@@ -88,26 +109,42 @@
     };
   });
 
-  // derive today's collected count using boundary baseline
+  // derive today's collected count using UTC boundary baseline
   const todayData = derived(history, $h => {
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const utcStartOfDay = getUTCStartOfDay(now); // UTC midnight for consistent global "today"
     const all = [...$h].sort((a, b) => a.ts - b.ts);
-    // last tick before today
-    let baselineTick = all.filter(t => t.ts < startOfDay).pop();
+    
+    // last tick before UTC today
+    let baselineTick = all.filter(t => t.ts < utcStartOfDay).pop();
     let baselineKnown = Boolean(baselineTick);
+    
     // if none before today, we cannot know baseline
     if (!baselineTick && all.length) {
       baselineTick = all[0];
       baselineKnown = false;
     }
-    const todayTicks = all.filter(t => t.ts >= startOfDay);
+    
+    const todayTicks = all.filter(t => t.ts >= utcStartOfDay);
     const lastToday = todayTicks.length ? todayTicks[todayTicks.length - 1] : baselineTick;
     const firstCount = baselineTick?.count ?? 0;
     const collected = lastToday && firstCount != null
       ? lastToday.count - firstCount
       : 0;
-    return { collected, baselineKnown };
+    
+    // Calculate time until reset in hours and minutes
+    const msUntilReset = Math.max(0, utcStartOfDay + MS_PER_DAY - Date.now());
+    const hoursUntilReset = Math.floor(msUntilReset / (1000 * 60 * 60));
+    const minutesUntilReset = Math.floor((msUntilReset % (1000 * 60 * 60)) / (1000 * 60));
+      
+    return { 
+      collected, 
+      baselineKnown, 
+      utcStartOfDay,
+      hoursUntilReset,
+      minutesUntilReset,
+      timeUntilResetText: `${hoursUntilReset}h ${minutesUntilReset}m`
+    };
   });
 
   // derive if today's quota met
@@ -411,26 +448,26 @@
     return '🟢 Live';
   }
 
-  // Share functionality
+  // Share functionality with dynamic stats
   function shareApp() {
+    const shareText = `🎮 Stop Destroying Videogames petition: ${$progression.signatureCount.toLocaleString()} signatures! Gaining ${Math.round($rate.perHour)}/hour. Help reach ${$progression.goal.toLocaleString()}!`;
+    
     if (navigator.share) {
       navigator.share({
         title: 'Stop Destroying Videogames - Live Tracker',
-        text: `${$progression.signatureCount.toLocaleString()} signatures so far! Track the progress live.`,
+        text: shareText,
         url: window.location.href
       }).catch(console.error);
     } else {
       // Fallback: copy to clipboard
-      navigator.clipboard.writeText(window.location.href).then(() => {
-        alert('Link copied to clipboard!');
+      navigator.clipboard.writeText(`${shareText} ${window.location.href}`).then(() => {
+        alert('Share text copied to clipboard!');
       }).catch(() => {
-        alert(`Share this link: ${window.location.href}`);
+        alert(`Share: ${shareText} ${window.location.href}`);
       });
     }
   }
 </script>
-
-<!-- Your existing HTML template stays the same -->
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
   <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-4 sm:space-y-6">
@@ -513,11 +550,14 @@
         Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
       </div>
 
-      <!-- Today's Stats -->
+      <!-- Today's Stats (UTC-based) -->
       <div class="grid grid-cols-3 gap-4 text-sm text-gray-700 dark:text-gray-300 text-center">
         <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400">Collected Today</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Collected Today (UTC)</div>
           <strong class="text-lg">{$todayData.collected.toLocaleString()}</strong>
+          <div class="text-xs text-gray-400 mt-1">
+            Resets in {$todayData.timeUntilResetText}
+          </div>
         </div>
         <div>
           <div class="text-xs text-gray-500 dark:text-gray-400">Daily Quota</div>
@@ -594,7 +634,7 @@
 
       <!-- Footer -->
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
-        <div>Live tracker • Updates every second</div>
+        <div>Live tracker • Updates every second • UTC timezone</div>
         <div class="mt-1">
           <a href="https://citizens-initiative.europa.eu/initiatives/details/2024/000045_en" 
              target="_blank" 
