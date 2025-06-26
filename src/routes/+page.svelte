@@ -636,7 +636,7 @@
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
         <div>Live tracker • Updates every second • UTC timezone</div>
         <div class="mt-1">
-          <a href="https://citizens-initiative.europa.eu/initiatives/details/2024/000045_en" 
+          <a href="https://eci.ec.europa.eu/045/public/" 
              target="_blank" 
              class="text-blue-500 hover:text-blue-600 transition-colors">
             Sign the petition →
