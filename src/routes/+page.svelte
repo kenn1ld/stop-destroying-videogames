@@ -263,10 +263,44 @@
 
   function formatDuration(days: number): string {
     if (days === Infinity) return 'Never at current rate';
-    if (days > 365) return `${Math.ceil(days / 365)} years`;
-    if (days > 30) return `${Math.ceil(days / 30)} months`;
-    if (days > 7) return `${Math.ceil(days / 7)} weeks`;
-    return `${Math.ceil(days)} days`;
+    
+    const totalDays = Math.ceil(days);
+    
+    if (totalDays > 365) {
+      const years = Math.floor(totalDays / 365);
+      const remainingDays = totalDays % 365;
+      if (remainingDays === 0) return `${years} year${years > 1 ? 's' : ''}`;
+      const months = Math.floor(remainingDays / 30);
+      if (months > 0) return `${years} year${years > 1 ? 's' : ''} ${months} month${months > 1 ? 's' : ''}`;
+      return `${years} year${years > 1 ? 's' : ''} ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    }
+    
+    if (totalDays > 60) {
+      const months = Math.floor(totalDays / 30);
+      const remainingDays = totalDays % 30;
+      if (remainingDays === 0) return `${months} month${months > 1 ? 's' : ''}`;
+      return `${months} month${months > 1 ? 's' : ''} ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    }
+    
+    if (totalDays > 30) {
+      const months = Math.floor(totalDays / 30);
+      const remainingDays = totalDays % 30;
+      return `1 month ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    }
+    
+    if (totalDays > 14) {
+      const weeks = Math.floor(totalDays / 7);
+      const remainingDays = totalDays % 7;
+      if (remainingDays === 0) return `${weeks} week${weeks > 1 ? 's' : ''}`;
+      return `${weeks} week${weeks > 1 ? 's' : ''} ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    }
+    
+    if (totalDays > 7) {
+      const remainingDays = totalDays % 7;
+      return `1 week ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    }
+    
+    return `${totalDays} day${totalDays > 1 ? 's' : ''}`;
   }
 
   function formatDate(date: Date | null): string {
@@ -468,7 +502,7 @@
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
         <div>Live tracker • Updates every second</div>
         <div class="mt-1">
-          <a href="https://citizens-initiative.europa.eu/initiatives/details/2024/000045_en" 
+          <a href="https://eci.ec.europa.eu/045/public/" 
              target="_blank" 
              class="text-blue-500 hover:text-blue-600 transition-colors">
             Sign the petition →
