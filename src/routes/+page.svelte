@@ -154,11 +154,15 @@
     };
   });
 
-  // ─── POLLING WITH RAILWAY BACKEND ────────────────────────────────────────
+  // ─── ENHANCED POLLING WITH RAILWAY BACKEND ──────────────────────────────
   let handle: ReturnType<typeof setInterval> | null = null;
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
   let isPageVisible = true;
+  
+  // ETag caching
+  let lastETag: string | null = null;
+  let lastSentData: { ts: number; count: number } | null = null;
 
   onMount(() => {
     if (!browser) return;
@@ -193,26 +197,56 @@
 
   async function loadHistory() {
     try {
-      const response = await fetch('/api/tick-history');
+      const headers: Record<string, string> = {};
+      
+      // Add ETag if we have one cached
+      if (lastETag) {
+        headers['If-None-Match'] = lastETag;
+      }
+      
+      const response = await fetch('/api/tick-history', { headers });
+      
+      if (response.status === 304) {
+        // Data hasn't changed, use cached version
+        console.log('History data unchanged (304)');
+        reconnectAttempts = 0;
+        return;
+      }
+      
       if (response.ok) {
         const serverHistory = await response.json();
         history.set(serverHistory);
-        reconnectAttempts = 0; // Reset on successful connection
+        
+        // Cache the ETag for next request
+        lastETag = response.headers.get('ETag');
+        reconnectAttempts = 0;
+        
+        console.log(`Loaded ${serverHistory.length} ticks from server`);
+      } else {
+        throw new Error(`HTTP ${response.status}`);
       }
     } catch (e) {
       console.error('Failed to load history from server:', e);
+      reconnectAttempts++;
+      
       // Fallback to localStorage for development
       try {
         const raw = localStorage.getItem(HISTORY_KEY);
         history.set(raw ? JSON.parse(raw) : []);
+        console.log('Loaded history from localStorage fallback');
       } catch {
         history.set([]);
       }
     }
   }
 
-  async function saveTickToServer(ts: number, count: number) {
+  async function saveTickToServer(ts: number, count: number, retryCount = 0) {
     try {
+      // Skip if identical to last sent data (client-side deduplication)
+      if (lastSentData?.ts === ts && lastSentData?.count === count) {
+        return;
+      }
+      
       // Only save if count actually changed to reduce server load
       if ($history.length > 0) {
         const lastTick = $history[$history.length - 1];
@@ -227,13 +261,33 @@
         body: JSON.stringify({ ts, count })
       });
       
+      if (response.status === 429) {
+        // Rate limited, wait before retry
+        const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
+        console.log(`Rate limited, waiting ${retryAfter}s before retry`);
+        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+        return; // Skip this tick
+      }
+      
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
       
+      // Update cache
+      lastSentData = { ts, count };
       reconnectAttempts = 0; // Reset on successful save
+      
     } catch (e) {
       console.error('Failed to save tick to server:', e);
+      
+      // Exponential backoff retry
+      if (retryCount < 3) {
+        const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+        console.log(`Retrying in ${delay}ms (attempt ${retryCount + 1}/3)`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return saveTickToServer(ts, count, retryCount + 1);
+      }
+      
       reconnectAttempts++;
       
       // Fallback to localStorage for development
@@ -243,6 +297,7 @@
           localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
           return next;
         });
+        console.log('Saved to localStorage fallback');
       } catch (localErr) {
         console.error('Failed to save to localStorage:', localErr);
       }
@@ -374,6 +429,8 @@
     }
   }
 </script>
+
+<!-- Your existing HTML template stays the same -->
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
   <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-4 sm:space-y-6">
