@@ -15,7 +15,6 @@
     return new Date(y, m - 1, d);
   }
   const HISTORY_KEY = 'eci-history';
-  const RATE_WINDOW = 30 * 1000; // average rate over last 30s
 
   // ─── STORES ───────────────────────────────────────────────────────────────
   const progression = writable<Progression>({ signatureCount: 0, goal: 1 });
@@ -25,31 +24,67 @@
   // history of ticks - now using server-side storage
   const history = writable<Tick[]>([]);
 
-  // derive averaged live rate
+  // derive averaged live rate with proper time windows
   const rate = derived(history, $h => {
     const now = Date.now();
-    const windowTicks = $h.filter(t => now - t.ts <= RATE_WINDOW);
-    if (windowTicks.length >= 2) {
-      const first = windowTicks[0], last = windowTicks[windowTicks.length - 1];
-      const dt = (last.ts - first.ts) / 1000;
-      const dc = last.count - first.count;
-      const perSec  = dt > 0 ? dc / dt : 0;
-      const perMin  = perSec * 60;
-      const perHour = perMin * 60;
-      const perDay  = perHour * 24;
-      return { perSec, perMin, perHour, perDay };
+    
+    // Different time windows for different rates
+    const WINDOWS = {
+      perSec: 30 * 1000,        // 30 seconds for per-second rate
+      perMin: 5 * 60 * 1000,    // 5 minutes for per-minute rate  
+      perHour: 30 * 60 * 1000,  // 30 minutes for per-hour rate
+      perDay: 4 * 60 * 60 * 1000 // 4 hours for per-day rate
+    };
+
+    function calculateRate(windowMs: number, targetUnit: number) {
+      const windowTicks = $h.filter(t => now - t.ts <= windowMs);
+      
+      if (windowTicks.length >= 2) {
+        const sortedTicks = windowTicks.sort((a, b) => a.ts - b.ts);
+        const first = sortedTicks[0];
+        const last = sortedTicks[sortedTicks.length - 1];
+        
+        const deltaTime = (last.ts - first.ts) / 1000; // seconds
+        const deltaCount = last.count - first.count;
+        
+        if (deltaTime > 0) {
+          const perSecond = deltaCount / deltaTime;
+          return perSecond * targetUnit;
+        }
+      }
+      
+      // Fallback: use last two ticks if available
+      if ($h.length >= 2) {
+        const sorted = [...$h].sort((a, b) => a.ts - b.ts);
+        const a = sorted[sorted.length - 2];
+        const b = sorted[sorted.length - 1];
+        
+        const deltaTime = (b.ts - a.ts) / 1000;
+        const deltaCount = b.count - a.count;
+        
+        if (deltaTime > 0) {
+          const perSecond = deltaCount / deltaTime;
+          return perSecond * targetUnit;
+        }
+      }
+      
+      return 0;
     }
-    if ($h.length >= 2) {
-      const a = $h[$h.length - 2], b = $h[$h.length - 1];
-      const dt = (b.ts - a.ts) / 1000;
-      const dc = b.count - a.count;
-      const perSec  = dt > 0 ? dc / dt : 0;
-      const perMin  = perSec * 60;
-      const perHour = perMin * 60;
-      const perDay  = perHour * 24;
-      return { perSec, perMin, perHour, perDay };
-    }
-    return { perSec: 0, perMin: 0, perHour: 0, perDay: 0 };
+
+    return {
+      perSec: calculateRate(WINDOWS.perSec, 1),          // signatures per second
+      perMin: calculateRate(WINDOWS.perMin, 60),         // signatures per minute  
+      perHour: calculateRate(WINDOWS.perHour, 3600),     // signatures per hour
+      perDay: calculateRate(WINDOWS.perDay, 86400),      // signatures per day
+      
+      // Additional info for confidence indicators
+      dataPoints: {
+        perSec: $h.filter(t => now - t.ts <= WINDOWS.perSec).length,
+        perMin: $h.filter(t => now - t.ts <= WINDOWS.perMin).length,
+        perHour: $h.filter(t => now - t.ts <= WINDOWS.perHour).length,
+        perDay: $h.filter(t => now - t.ts <= WINDOWS.perDay).length
+      }
+    };
   });
 
   // derive today's collected count using boundary baseline
@@ -173,6 +208,21 @@
       error.set((e as Error).message);
     }
   }
+
+  // Helper function to get confidence indicator
+  function getConfidenceIndicator(dataPoints: number, type: 'perSec' | 'perMin' | 'perHour' | 'perDay') {
+    const thresholds = {
+      perSec: { good: 10, ok: 5 },
+      perMin: { good: 50, ok: 20 },
+      perHour: { good: 200, ok: 100 },
+      perDay: { good: 800, ok: 400 }
+    };
+    
+    const threshold = thresholds[type];
+    if (dataPoints >= threshold.good) return '✅';
+    if (dataPoints >= threshold.ok) return '⚠️';
+    return '⏳';
+  }
 </script>
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-6">
@@ -182,12 +232,41 @@
     {#if $error}
       <p class="text-center text-red-600 dark:text-red-400">Error: {$error}</p>
     {:else}
-      <!-- Live Rates -->
+      <!-- Live Rates with Confidence Indicators -->
       <div class="grid grid-cols-2 gap-4 text-sm text-gray-700 dark:text-gray-300">
-        <div>Rate/sec:  <strong>{$rate.perSec.toFixed(2)}</strong></div>
-        <div>Rate/min:  <strong>{$rate.perMin.toFixed(0)}</strong></div>
-        <div>Rate/hr:   <strong>{$rate.perHour.toFixed(0)}</strong></div>
-        <div>Rate/day:  <strong>{$rate.perDay.toFixed(0)}</strong></div>
+        <div class="flex items-center justify-between">
+          <span>Rate/sec:</span>
+          <span class="flex items-center gap-1">
+            <strong>{$rate.perSec.toFixed(2)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perSec, 'perSec')}</span>
+          </span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span>Rate/min:</span>
+          <span class="flex items-center gap-1">
+            <strong>{$rate.perMin.toFixed(0)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perMin, 'perMin')}</span>
+          </span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span>Rate/hr:</span>
+          <span class="flex items-center gap-1">
+            <strong>{$rate.perHour.toFixed(0)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perHour, 'perHour')}</span>
+          </span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span>Rate/day:</span>
+          <span class="flex items-center gap-1">
+            <strong>{$rate.perDay.toFixed(0)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perDay, 'perDay')}</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- Data Quality Indicator -->
+      <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
+        Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
       </div>
 
       <!-- Today's Stats -->
@@ -247,6 +326,15 @@
           const sigsLeft = $progression.goal - $progression.signatureCount;
           return (daysLeft>0 ? Math.ceil(sigsLeft / daysLeft) : sigsLeft).toLocaleString();
         })()}</span> signatures/day to reach <strong>{$progression.goal.toLocaleString()}</strong>.
+      </div>
+
+      <!-- Legend for confidence indicators -->
+      <div class="text-xs text-gray-500 dark:text-gray-400 text-center border-t pt-3">
+        <div class="grid grid-cols-3 gap-2">
+          <span>✅ Reliable</span>
+          <span>⚠️ Stabilizing</span>
+          <span>⏳ Warming up</span>
+        </div>
       </div>
     {/if}
   </div>
