@@ -34,13 +34,8 @@ export const POST: RequestHandler = async (event) => {
       }
     }
     
-    // Add new tick
+    // Add new tick - no limit!
     arr.push({ ts, count });
-    
-    // Optional: Keep only last 10000 ticks to prevent file from growing too large
-    if (arr.length > 10000) {
-      arr = arr.slice(-10000);
-    }
     
     // Write back to file
     fs.writeFileSync(DB, JSON.stringify(arr), 'utf-8');
