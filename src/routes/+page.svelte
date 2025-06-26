@@ -129,28 +129,54 @@
   );
 
   // Derive time-based projections
-  const projections = derived([rate, progression], ([$rate, $prog]) => {
+  const projections = derived([rate, progression, initiative], ([$rate, $prog, $init]) => {
     const sigsLeft = $prog.goal - $prog.signatureCount;
+    
+    // Calculate current daily quota dynamically
+    let dailyQuota = 0;
+    if ($init.closingDate) {
+      const now = new Date();
+      const close = parseEUDate($init.closingDate);
+      const daysLeft = Math.max((close.getTime() - now.getTime()) / MS_PER_DAY, 0);
+      dailyQuota = daysLeft > 0 ? Math.ceil(sigsLeft / daysLeft) : sigsLeft;
+    }
     
     return {
       timeToGoal: {
         atCurrentRate: $rate.perDay > 0 ? Math.ceil(sigsLeft / $rate.perDay) : Infinity,
-        atNeededRate: Math.ceil(sigsLeft / 13071) // based on current daily quota
+        atNeededRate: dailyQuota > 0 ? Math.ceil(sigsLeft / dailyQuota) : Infinity
       },
       projectedCompletion: {
         current: $rate.perDay > 0 ? new Date(Date.now() + (sigsLeft / $rate.perDay) * MS_PER_DAY) : null,
-        needed: new Date(Date.now() + (sigsLeft / 13071) * MS_PER_DAY)
-      }
+        needed: dailyQuota > 0 ? new Date(Date.now() + (sigsLeft / dailyQuota) * MS_PER_DAY) : null
+      },
+      dailyQuota
     };
   });
 
   // ─── POLLING WITH RAILWAY BACKEND ────────────────────────────────────────
-  let handle: ReturnType<typeof setInterval>;
+  let handle: ReturnType<typeof setInterval> | null = null;
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
+  let isPageVisible = true;
 
   onMount(() => {
     if (!browser) return;
+
+    // Handle page visibility changes to save resources
+    const handleVisibilityChange = () => {
+      isPageVisible = !document.hidden;
+      if (isPageVisible && !handle) {
+        // Resume polling when page becomes visible
+        handle = setInterval(tick, 1000);
+      } else if (!isPageVisible && handle) {
+        // Pause polling when page is hidden
+        clearInterval(handle);
+        handle = null;
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     // Load history from server and start polling
     (async () => {
@@ -159,7 +185,10 @@
       handle = setInterval(tick, 1000);
     })();
     
-    return () => clearInterval(handle);
+    return () => {
+      if (handle) clearInterval(handle);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   });
 
   async function loadHistory() {
@@ -184,6 +213,14 @@
 
   async function saveTickToServer(ts: number, count: number) {
     try {
+      // Only save if count actually changed to reduce server load
+      if ($history.length > 0) {
+        const lastTick = $history[$history.length - 1];
+        if (lastTick.count === count) {
+          return; // Skip saving identical counts
+        }
+      }
+      
       const response = await fetch('/api/tick', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -338,13 +375,13 @@
   }
 </script>
 
-<main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-6">
-  <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-8 space-y-6">
+<main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
+  <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-4 sm:space-y-6">
     <!-- Header with connection status -->
-    <div class="flex items-center justify-between">
-      <h1 class="text-3xl font-bold text-gray-900 dark:text-gray-100">Stop Destroying Videogames</h1>
-      <div class="flex items-center gap-2">
-        <span class="text-xs text-gray-500">{getConnectionStatus()}</span>
+    <div class="flex items-start justify-between gap-4">
+      <h1 class="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 leading-tight">Stop Destroying Videogames</h1>
+      <div class="flex items-center gap-2 shrink-0">
+        <span class="text-xs text-gray-500 whitespace-nowrap">{getConnectionStatus()}</span>
         <button 
           on:click={shareApp}
           class="p-2 text-gray-500 hover:text-blue-600 transition-colors"
@@ -502,7 +539,7 @@
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
         <div>Live tracker • Updates every second</div>
         <div class="mt-1">
-          <a href="https://eci.ec.europa.eu/045/public/" 
+          <a href="https://citizens-initiative.europa.eu/initiatives/details/2024/000045_en" 
              target="_blank" 
              class="text-blue-500 hover:text-blue-600 transition-colors">
             Sign the petition →
