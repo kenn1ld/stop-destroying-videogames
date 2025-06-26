@@ -7,6 +7,13 @@
   interface Progression { signatureCount: number; goal: number; }
   interface InitiativeInfo { registrationDate: string; closingDate: string; }
   interface Tick { ts: number; count: number; }
+  interface DailyStat {
+    date: string; // YYYY-MM-DD UTC
+    signaturesCollected: number;
+    startCount: number;
+    endCount: number;
+    dataPoints: number;
+  }
 
   // ─── HELPERS ─────────────────────────────────────────────────────────────
   const MS_PER_DAY = 1000 * 60 * 60 * 24;
@@ -35,6 +42,11 @@
     }) + ' UTC';
   }
   
+  function getYesterdayDateString(): string {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    return yesterday.toISOString().split('T')[0];
+  }
+  
   const HISTORY_KEY = 'eci-history';
 
   // ─── STORES ───────────────────────────────────────────────────────────────
@@ -43,10 +55,19 @@
   const error       = writable<string | null>(null);
   const lastUpdate  = writable<number>(0);
 
-  // history of ticks - now using server-side storage
+  // history of ticks - now only today's data
   const history = writable<Tick[]>([]);
+  
+  // daily stats for historical data
+  const dailyStats = writable<DailyStat[]>([]);
 
-  // derive averaged live rate with proper time windows
+  // derive yesterday's performance
+  const yesterdayStats = derived(dailyStats, $stats => {
+    const yesterdayDate = getYesterdayDateString();
+    return $stats.find(stat => stat.date === yesterdayDate) || null;
+  });
+
+  // derive averaged live rate with proper time windows (same as before)
   const rate = derived(history, $h => {
     const now = Date.now();
     
@@ -94,12 +115,11 @@
     }
 
     return {
-      perSec: calculateRate(WINDOWS.perSec, 1),          // signatures per second
-      perMin: calculateRate(WINDOWS.perMin, 60),         // signatures per minute  
-      perHour: calculateRate(WINDOWS.perHour, 3600),     // signatures per hour
-      perDay: calculateRate(WINDOWS.perDay, 86400),      // signatures per day
+      perSec: calculateRate(WINDOWS.perSec, 1),
+      perMin: calculateRate(WINDOWS.perMin, 60),
+      perHour: calculateRate(WINDOWS.perHour, 3600),
+      perDay: calculateRate(WINDOWS.perDay, 86400),
       
-      // Additional info for confidence indicators
       dataPoints: {
         perSec: $h.filter(t => now - t.ts <= WINDOWS.perSec).length,
         perMin: $h.filter(t => now - t.ts <= WINDOWS.perMin).length,
@@ -112,27 +132,25 @@
   // derive today's collected count using UTC boundary baseline
   const todayData = derived(history, $h => {
     const now = new Date();
-    const utcStartOfDay = getUTCStartOfDay(now); // UTC midnight for consistent global "today"
+    const utcStartOfDay = getUTCStartOfDay(now);
     const all = [...$h].sort((a, b) => a.ts - b.ts);
     
-    // last tick before UTC today
-    let baselineTick = all.filter(t => t.ts < utcStartOfDay).pop();
-    let baselineKnown = Boolean(baselineTick);
+    // For today's data, we need to find the baseline count at start of day
+    // Since we now only keep today's data, we need to get this from either:
+    // 1. The first tick of today (if it exists)
+    // 2. The last count from yesterday's daily stats
+    let baselineCount = 0;
+    let baselineKnown = false;
     
-    // if none before today, we cannot know baseline
-    if (!baselineTick && all.length) {
-      baselineTick = all[0];
-      baselineKnown = false;
+    if (all.length > 0) {
+      baselineCount = all[0].count;
+      baselineKnown = true;
     }
     
-    const todayTicks = all.filter(t => t.ts >= utcStartOfDay);
-    const lastToday = todayTicks.length ? todayTicks[todayTicks.length - 1] : baselineTick;
-    const firstCount = baselineTick?.count ?? 0;
-    const collected = lastToday && firstCount != null
-      ? lastToday.count - firstCount
-      : 0;
+    const lastToday = all.length ? all[all.length - 1] : null;
+    const collected = lastToday ? lastToday.count - baselineCount : 0;
     
-    // Calculate time until reset in hours and minutes
+    // Calculate time until reset
     const msUntilReset = Math.max(0, utcStartOfDay + MS_PER_DAY - Date.now());
     const hoursUntilReset = Math.floor(msUntilReset / (1000 * 60 * 60));
     const minutesUntilReset = Math.floor((msUntilReset % (1000 * 60 * 60)) / (1000 * 60));
@@ -165,11 +183,10 @@
     }
   );
 
-  // Derive time-based projections
+  // Derive time-based projections (same as before)
   const projections = derived([rate, progression, initiative], ([$rate, $prog, $init]) => {
     const sigsLeft = $prog.goal - $prog.signatureCount;
     
-    // Calculate current daily quota dynamically
     let dailyQuota = 0;
     if ($init.closingDate) {
       const now = new Date();
@@ -191,7 +208,7 @@
     };
   });
 
-  // ─── ENHANCED POLLING WITH RAILWAY BACKEND ──────────────────────────────
+  // ─── ENHANCED POLLING WITH DAILY RESET SUPPORT ──────────────────────────
   let handle: ReturnType<typeof setInterval> | null = null;
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
@@ -204,14 +221,12 @@
   onMount(() => {
     if (!browser) return;
 
-    // Handle page visibility changes to save resources
+    // Handle page visibility changes
     const handleVisibilityChange = () => {
       isPageVisible = !document.hidden;
       if (isPageVisible && !handle) {
-        // Resume polling when page becomes visible
         handle = setInterval(tick, 1000);
       } else if (!isPageVisible && handle) {
-        // Pause polling when page is hidden
         clearInterval(handle);
         handle = null;
       }
@@ -219,7 +234,7 @@
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Load history from server and start polling
+    // Load data and start polling
     (async () => {
       await loadHistory();
       await tick();
@@ -236,7 +251,6 @@
     try {
       const headers: Record<string, string> = {};
       
-      // Add ETag if we have one cached
       if (lastETag) {
         headers['If-None-Match'] = lastETag;
       }
@@ -244,21 +258,27 @@
       const response = await fetch('/api/tick-history', { headers });
       
       if (response.status === 304) {
-        // Data hasn't changed, use cached version
         console.log('History data unchanged (304)');
         reconnectAttempts = 0;
         return;
       }
       
       if (response.ok) {
-        const serverHistory = await response.json();
-        history.set(serverHistory);
+        const serverData = await response.json();
         
-        // Cache the ETag for next request
+        // Handle new response format with ticks and dailyStats
+        if (serverData.ticks && Array.isArray(serverData.ticks)) {
+          history.set(serverData.ticks);
+          dailyStats.set(serverData.dailyStats || []);
+        } else {
+          // Fallback for old format
+          history.set(Array.isArray(serverData) ? serverData : []);
+        }
+        
         lastETag = response.headers.get('ETag');
         reconnectAttempts = 0;
         
-        console.log(`Loaded ${serverHistory.length} ticks from server`);
+        console.log(`Loaded ${serverData.ticks?.length || 0} ticks and ${serverData.dailyStats?.length || 0} daily stats from server`);
       } else {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -279,16 +299,16 @@
 
   async function saveTickToServer(ts: number, count: number, retryCount = 0) {
     try {
-      // Skip if identical to last sent data (client-side deduplication)
+      // Skip if identical to last sent data
       if (lastSentData?.ts === ts && lastSentData?.count === count) {
         return;
       }
       
-      // Only save if count actually changed to reduce server load
+      // Only save if count actually changed
       if ($history.length > 0) {
         const lastTick = $history[$history.length - 1];
         if (lastTick.count === count) {
-          return; // Skip saving identical counts
+          return;
         }
       }
       
@@ -299,27 +319,24 @@
       });
       
       if (response.status === 429) {
-        // Rate limited, wait before retry
         const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
         console.log(`Rate limited, waiting ${retryAfter}s before retry`);
         await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-        return; // Skip this tick
+        return;
       }
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
       
-      // Update cache
       lastSentData = { ts, count };
-      reconnectAttempts = 0; // Reset on successful save
+      reconnectAttempts = 0;
       
     } catch (e) {
       console.error('Failed to save tick to server:', e);
       
-      // Exponential backoff retry
       if (retryCount < 3) {
-        const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+        const delay = Math.pow(2, retryCount) * 1000;
         console.log(`Retrying in ${delay}ms (attempt ${retryCount + 1}/3)`);
         await new Promise(resolve => setTimeout(resolve, delay));
         return saveTickToServer(ts, count, retryCount + 1);
@@ -327,7 +344,7 @@
       
       reconnectAttempts++;
       
-      // Fallback to localStorage for development
+      // Fallback to localStorage
       try {
         history.update(h => {
           const next = [...h, { ts, count }];
@@ -339,7 +356,6 @@
         console.error('Failed to save to localStorage:', localErr);
       }
       
-      // If too many failures, try to reload history
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
         console.log('Too many failures, attempting to reload history...');
         await loadHistory();
@@ -375,7 +391,7 @@
     }
   }
 
-  // Helper function to get confidence indicator
+  // Helper functions (same as before)
   function getConfidenceIndicator(dataPoints: number, type: 'perSec' | 'perMin' | 'perHour' | 'perDay') {
     const thresholds = {
       perSec: { good: 10, ok: 5 },
@@ -494,6 +510,26 @@
         </p>
       </div>
     {:else}
+      <!-- Yesterday's Performance (if available) -->
+      {#if $yesterdayStats}
+        <div class="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 space-y-2">
+          <h3 class="font-semibold text-green-900 dark:text-green-100 text-sm">📈 Yesterday's Performance</h3>
+          <div class="grid grid-cols-2 gap-4 text-xs text-green-800 dark:text-green-200">
+            <div>
+              <div class="font-medium">Signatures Collected:</div>
+              <div class="text-lg font-semibold">{$yesterdayStats.signaturesCollected.toLocaleString()}</div>
+            </div>
+            <div>
+              <div class="font-medium">Data Points:</div>
+              <div class="text-lg font-semibold">{$yesterdayStats.dataPoints.toLocaleString()}</div>
+            </div>
+          </div>
+          <div class="text-xs text-green-600 dark:text-green-300 text-center">
+            From {$yesterdayStats.startCount.toLocaleString()} to {$yesterdayStats.endCount.toLocaleString()}
+          </div>
+        </div>
+      {/if}
+
       <!-- Live Rates with Confidence Indicators -->
       <div class="grid grid-cols-2 gap-4 text-sm text-gray-700 dark:text-gray-300">
         <div class="flex items-center justify-between">
@@ -545,11 +581,6 @@
         </div>
       {/if}
 
-      <!-- Data Quality Indicator -->
-      <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
-        Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
-      </div>
-
       <!-- Today's Stats (UTC-based) -->
       <div class="grid grid-cols-3 gap-4 text-sm text-gray-700 dark:text-gray-300 text-center">
         <div>
@@ -572,9 +603,14 @@
           {/if}
         </div>
         <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400">Data Points</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Today's Data Points</div>
           <strong class="text-lg">{$history.length}</strong>
         </div>
+      </div>
+
+      <!-- Data Quality Indicator -->
+      <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
+        Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
       </div>
 
       <!-- Original Progress & Time UI -->
@@ -623,6 +659,21 @@
         })()}</span> signatures/day to reach <strong>{$progression.goal.toLocaleString()}</strong>.
       </div>
 
+      <!-- Historical Performance (if multiple days available) -->
+      {#if $dailyStats.length > 1}
+        <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4 space-y-2">
+          <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm">📊 Recent Performance</h3>
+          <div class="space-y-1 max-h-24 overflow-y-auto">
+            {#each $dailyStats.slice(-3).reverse() as stat}
+              <div class="flex justify-between items-center text-xs text-gray-600 dark:text-gray-400">
+                <span>{new Date(stat.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                <span class="font-semibold">{stat.signaturesCollected.toLocaleString()}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       <!-- Legend for confidence indicators -->
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center border-t pt-3">
         <div class="grid grid-cols-3 gap-2">
@@ -634,7 +685,7 @@
 
       <!-- Footer -->
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
-        <div>Live tracker • Updates every second • UTC timezone</div>
+        <div>Live tracker • Updates every second • UTC timezone • Daily reset</div>
         <div class="mt-1">
           <a href="https://eci.ec.europa.eu/045/public/" 
              target="_blank" 
