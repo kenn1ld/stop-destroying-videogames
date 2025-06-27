@@ -5,5 +5,12 @@
     "startCount": 562746,
     "endCount": 564848,
     "dataPoints": 20
+  },
+  {
+    "date": "2025-06-27",
+    "signaturesCollected": 27161,
+    "startCount": 565913,
+    "endCount": 593074,
+    "dataPoints": 351
   }
 ]
