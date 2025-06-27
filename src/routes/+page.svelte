@@ -1,516 +1,328 @@
+<!-- ===== src/routes/+page.svelte (or your main Svelte component) ===== -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { writable, derived } from 'svelte/store';
+  import { writable, derived, get } from 'svelte/store';
   import { browser } from '$app/environment';
 
-  // ─── TYPES ───────────────────────────────────────────────────────────────
   interface Progression { signatureCount: number; goal: number; }
   interface InitiativeInfo { registrationDate: string; closingDate: string; }
   interface Tick { ts: number; count: number; }
-  interface DailyStat {
-    date: string; // YYYY-MM-DD UTC
-    signaturesCollected: number;
-    startCount: number;
-    endCount: number;
-    dataPoints: number;
-  }
+  interface DailyStat { date: string; signaturesCollected: number; startCount: number; endCount: number; dataPoints: number; }
 
-  // ─── HELPERS ─────────────────────────────────────────────────────────────
-  const MS_PER_DAY = 1000 * 60 * 60 * 24;
-  
-  function parseEUDate(input: string) {
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const TZ_OFFSET_MS = 2 * 60 * 60 * 1000; // UTC+2
+
+  function parseEUDate(input: string): Date {
     const [d, m, y] = input.split('/').map(Number);
     return new Date(y, m - 1, d);
   }
-  
-  // UTC helper functions for consistent global timing
-  function getUTCStartOfDay(date: Date = new Date()): number {
-    return new Date(Date.UTC(
-      date.getUTCFullYear(),
-      date.getUTCMonth(), 
-      date.getUTCDate()
-    )).getTime();
-  }
-  
-  function formatUTCDate(timestamp: number): string {
-    const date = new Date(timestamp);
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
-      day: 'numeric', 
-      year: 'numeric',
-      timeZone: 'UTC'
-    }) + ' UTC';
-  }
-  
-  function getYesterdayDateString(): string {
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    return yesterday.toISOString().split('T')[0];
-  }
-  
-  const HISTORY_KEY = 'eci-history';
 
-  // ─── STORES ───────────────────────────────────────────────────────────────
+  // Local (UTC+2) helper functions
+  function getLocalStartOfDay(date: Date = new Date()): number {
+    const ts = date.getTime() + TZ_OFFSET_MS;
+    const d  = new Date(ts);
+    const utcMid = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    return utcMid - TZ_OFFSET_MS;
+  }
+
+  function formatLocalDate(ts: number): string {
+    const d = new Date(ts + TZ_OFFSET_MS);
+    return d.toLocaleDateString('en-US', {
+      month: 'short',
+      day:   'numeric',
+      year:  'numeric',
+    }) + ' UTC+2';
+  }
+
+  function getYesterdayDateString(): string {
+    const todayStart = getLocalStartOfDay();
+    const yestStart  = todayStart - MS_PER_DAY;
+    return new Date(yestStart + TZ_OFFSET_MS).toISOString().split('T')[0];
+  }
+
   const progression = writable<Progression>({ signatureCount: 0, goal: 1 });
   const initiative  = writable<InitiativeInfo>({ registrationDate: '', closingDate: '' });
   const error       = writable<string | null>(null);
   const lastUpdate  = writable<number>(0);
+  const history     = writable<Tick[]>([]);
+  const dailyStats  = writable<DailyStat[]>([]);
 
-  // history of ticks - now only today's data
-  const history = writable<Tick[]>([]);
-  
-  // daily stats for historical data
-  const dailyStats = writable<DailyStat[]>([]);
-
-  // derive yesterday's performance
-  const yesterdayStats = derived(dailyStats, $stats => {
-    const yesterdayDate = getYesterdayDateString();
-    return $stats.find(stat => stat.date === yesterdayDate) || null;
+  // yesterday’s stats
+  const yesterdayStats = derived(dailyStats, $s => {
+    return $s.find(st => st.date === getYesterdayDateString()) || null;
   });
 
-  // derive averaged live rate with proper time windows (same as before)
+  // live rates
   const rate = derived(history, $h => {
     const now = Date.now();
-    
-    // Different time windows for different rates
     const WINDOWS = {
-      perSec: 30 * 1000,        // 30 seconds for per-second rate
-      perMin: 5 * 60 * 1000,    // 5 minutes for per-minute rate  
-      perHour: 30 * 60 * 1000,  // 30 minutes for per-hour rate
-      perDay: 4 * 60 * 60 * 1000 // 4 hours for per-day rate
+      perSec: 30 * 1000,
+      perMin: 5 * 60 * 1000,
+      perHour: 30 * 60 * 1000,
+      perDay: 4 * 60 * 60 * 1000
     };
-
-    function calculateRate(windowMs: number, targetUnit: number) {
-      const windowTicks = $h.filter(t => now - t.ts <= windowMs);
-      
-      if (windowTicks.length >= 2) {
-        const sortedTicks = windowTicks.sort((a, b) => a.ts - b.ts);
-        const first = sortedTicks[0];
-        const last = sortedTicks[sortedTicks.length - 1];
-        
-        const deltaTime = (last.ts - first.ts) / 1000; // seconds
-        const deltaCount = last.count - first.count;
-        
-        if (deltaTime > 0) {
-          const perSecond = deltaCount / deltaTime;
-          return perSecond * targetUnit;
-        }
+    function calc(w: number, unit: number) {
+      const wTicks = $h.filter(t => now - t.ts <= w).sort((a,b)=>a.ts-b.ts);
+      if (wTicks.length >= 2) {
+        const first = wTicks[0], last = wTicks[wTicks.length-1];
+        const dt = (last.ts-first.ts)/1000;
+        const dc = last.count-first.count;
+        if (dt>0) return dc/dt * unit;
       }
-      
-      // Fallback: use last two ticks if available
-      if ($h.length >= 2) {
-        const sorted = [...$h].sort((a, b) => a.ts - b.ts);
-        const a = sorted[sorted.length - 2];
-        const b = sorted[sorted.length - 1];
-        
-        const deltaTime = (b.ts - a.ts) / 1000;
-        const deltaCount = b.count - a.count;
-        
-        if (deltaTime > 0) {
-          const perSecond = deltaCount / deltaTime;
-          return perSecond * targetUnit;
-        }
+      if ($h.length>=2) {
+        const [a,b] = [...$h].sort((a,b)=>a.ts-b.ts).slice(-2);
+        const dt = (b.ts-a.ts)/1000, dc=b.count-a.count;
+        if (dt>0) return dc/dt * unit;
       }
-      
       return 0;
     }
-
     return {
-      perSec: calculateRate(WINDOWS.perSec, 1),
-      perMin: calculateRate(WINDOWS.perMin, 60),
-      perHour: calculateRate(WINDOWS.perHour, 3600),
-      perDay: calculateRate(WINDOWS.perDay, 86400),
-      
+      perSec: calc(WINDOWS.perSec, 1),
+      perMin: calc(WINDOWS.perMin, 60),
+      perHour: calc(WINDOWS.perHour, 3600),
+      perDay: calc(WINDOWS.perDay, 86400),
       dataPoints: {
-        perSec: $h.filter(t => now - t.ts <= WINDOWS.perSec).length,
-        perMin: $h.filter(t => now - t.ts <= WINDOWS.perMin).length,
-        perHour: $h.filter(t => now - t.ts <= WINDOWS.perHour).length,
-        perDay: $h.filter(t => now - t.ts <= WINDOWS.perDay).length
+        perSec: $h.filter(t=>now-t.ts<=WINDOWS.perSec).length,
+        perMin: $h.filter(t=>now-t.ts<=WINDOWS.perMin).length,
+        perHour: $h.filter(t=>now-t.ts<=WINDOWS.perHour).length,
+        perDay: $h.filter(t=>now-t.ts<=WINDOWS.perDay).length
       }
     };
   });
 
-  // derive today's collected count using UTC boundary baseline
+  // today’s collected (UTC+2)
   const todayData = derived(history, $h => {
-    const now = new Date();
-    const utcStartOfDay = getUTCStartOfDay(now);
-    const all = [...$h].sort((a, b) => a.ts - b.ts);
-    
-    // For today's data, we need to find the baseline count at start of day
-    // Since we now only keep today's data, we need to get this from either:
-    // 1. The first tick of today (if it exists)
-    // 2. The last count from yesterday's daily stats
-    let baselineCount = 0;
-    let baselineKnown = false;
-    
-    if (all.length > 0) {
-      baselineCount = all[0].count;
-      baselineKnown = true;
-    }
-    
-    const lastToday = all.length ? all[all.length - 1] : null;
-    const collected = lastToday ? lastToday.count - baselineCount : 0;
-    
-    // Calculate time until reset
-    const msUntilReset = Math.max(0, utcStartOfDay + MS_PER_DAY - Date.now());
-    const hoursUntilReset = Math.floor(msUntilReset / (1000 * 60 * 60));
-    const minutesUntilReset = Math.floor((msUntilReset % (1000 * 60 * 60)) / (1000 * 60));
-      
-    return { 
-      collected, 
-      baselineKnown, 
-      utcStartOfDay,
-      hoursUntilReset,
-      minutesUntilReset,
-      timeUntilResetText: `${hoursUntilReset}h ${minutesUntilReset}m`
-    };
+    const start = getLocalStartOfDay();
+    const all   = [...$h].sort((a,b)=>a.ts-b.ts);
+    const baseline = all.length ? all[0].count : 0;
+    const last = all.length ? all[all.length-1].count : baseline;
+    const collected = last - baseline;
+    const msUntilReset = Math.max(0, start + MS_PER_DAY - Date.now());
+    const hrs = Math.floor(msUntilReset / 3_600_000);
+    const mins = Math.floor((msUntilReset % 3_600_000) / 60_000);
+    return { collected, utcStartOfDay: start, timeUntilResetText: `${hrs}h ${mins}m`, baselineKnown: all.length>0 };
   });
 
-  // derive if today's quota met
+  // daily quota met?
   const metToday = derived(
     [todayData, progression, initiative],
     ([$today, $prog, $init]) => {
       if (!$init.registrationDate) return false;
-      const now = new Date();
-      const reg = parseEUDate($init.registrationDate);
-      const close = parseEUDate($init.closingDate);
-      const totalDays = (close.getTime() - reg.getTime()) / MS_PER_DAY;
-      const daysLeft  = Math.max((close.getTime() - now.getTime()) / MS_PER_DAY, 0);
-      const sigsLeft  = $prog.goal - $prog.signatureCount;
-      const neededPerDay = daysLeft > 0
-        ? Math.ceil(sigsLeft / daysLeft)
-        : sigsLeft;
-      return $today.collected >= neededPerDay;
+      const now = new Date(), reg = parseEUDate($init.registrationDate), close = parseEUDate($init.closingDate);
+      const daysLeft = Math.max((close.getTime()-now.getTime())/MS_PER_DAY, 0);
+      const sigsLeft = $prog.goal - $prog.signatureCount;
+      const needed = daysLeft>0 ? Math.ceil(sigsLeft/daysLeft) : sigsLeft;
+      return $today.collected >= needed;
     }
   );
 
-  // Derive time-based projections (same as before)
-  const projections = derived([rate, progression, initiative], ([$rate, $prog, $init]) => {
+  // projections
+  const projections = derived([rate, progression, initiative], ([$rate,$prog,$init]) => {
     const sigsLeft = $prog.goal - $prog.signatureCount;
-    
     let dailyQuota = 0;
     if ($init.closingDate) {
-      const now = new Date();
-      const close = parseEUDate($init.closingDate);
-      const daysLeft = Math.max((close.getTime() - now.getTime()) / MS_PER_DAY, 0);
-      dailyQuota = daysLeft > 0 ? Math.ceil(sigsLeft / daysLeft) : sigsLeft;
+      const now = new Date(), close = parseEUDate($init.closingDate);
+      const daysLeft = Math.max((close.getTime()-now.getTime())/MS_PER_DAY, 0);
+      dailyQuota = daysLeft>0?Math.ceil(sigsLeft/daysLeft):sigsLeft;
     }
-    
     return {
       timeToGoal: {
-        atCurrentRate: $rate.perDay > 0 ? Math.ceil(sigsLeft / $rate.perDay) : Infinity,
-        atNeededRate: dailyQuota > 0 ? Math.ceil(sigsLeft / dailyQuota) : Infinity
+        atCurrentRate: $rate.perDay>0?Math.ceil(sigsLeft/$rate.perDay):Infinity,
+        atNeededRate: dailyQuota>0?Math.ceil(sigsLeft/dailyQuota):Infinity
       },
       projectedCompletion: {
-        current: $rate.perDay > 0 ? new Date(Date.now() + (sigsLeft / $rate.perDay) * MS_PER_DAY) : null,
-        needed: dailyQuota > 0 ? new Date(Date.now() + (sigsLeft / dailyQuota) * MS_PER_DAY) : null
+        current: $rate.perDay>0?new Date(Date.now() + (sigsLeft/$rate.perDay)*MS_PER_DAY):null,
+        needed: dailyQuota>0?new Date(Date.now() + (sigsLeft/dailyQuota)*MS_PER_DAY):null
       },
       dailyQuota
     };
   });
 
-  // ─── ENHANCED POLLING WITH DAILY RESET SUPPORT ──────────────────────────
-  let handle: ReturnType<typeof setInterval> | null = null;
+  let handle: ReturnType<typeof setInterval>|null = null;
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
-  let isPageVisible = true;
-  
-  // ETag caching
-  let lastETag: string | null = null;
-  let lastSentData: { ts: number; count: number } | null = null;
+  let lastETag: string|null = null;
+  let lastSent: Tick|null = null;
+  const HISTORY_KEY = 'eci-history';
 
   onMount(() => {
     if (!browser) return;
-
-    // Handle page visibility changes
-    const handleVisibilityChange = () => {
-      isPageVisible = !document.hidden;
-      if (isPageVisible && !handle) {
-        handle = setInterval(tick, 1000);
-      } else if (!isPageVisible && handle) {
-        clearInterval(handle);
-        handle = null;
-      }
+    const onVis = () => {
+      if (!document.hidden && !handle) handle = setInterval(tick, 1000);
+      if (document.hidden && handle) { clearInterval(handle); handle = null; }
     };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    // Load data and start polling
-    (async () => {
-      await loadHistory();
-      await tick();
-      handle = setInterval(tick, 1000);
-    })();
-    
+    document.addEventListener('visibilitychange', onVis);
+    (async () => { await loadHistory(); await tick(); handle = setInterval(tick,1000); })();
     return () => {
       if (handle) clearInterval(handle);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', onVis);
     };
   });
 
   async function loadHistory() {
     try {
-      const headers: Record<string, string> = {};
-      
-      if (lastETag) {
-        headers['If-None-Match'] = lastETag;
-      }
-      
-      const response = await fetch('/api/tick-history', { headers });
-      
-      if (response.status === 304) {
-        console.log('History data unchanged (304)');
-        reconnectAttempts = 0;
-        return;
-      }
-      
-      if (response.ok) {
-        const serverData = await response.json();
-        
-        // Handle new response format with ticks and dailyStats
-        if (serverData.ticks && Array.isArray(serverData.ticks)) {
-          history.set(serverData.ticks);
-          dailyStats.set(serverData.dailyStats || []);
+      const headers: Record<string,string> = {};
+      if (lastETag) headers['If-None-Match'] = lastETag;
+      const res = await fetch('/api/tick-history', { headers });
+      if (res.status===304) { reconnectAttempts=0; return; }
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.ticks)) {
+          history.set(data.ticks);
+          dailyStats.set(data.dailyStats||[]);
         } else {
-          // Fallback for old format
-          history.set(Array.isArray(serverData) ? serverData : []);
+          history.set([]);
         }
-        
-        lastETag = response.headers.get('ETag');
+        lastETag = res.headers.get('ETag');
         reconnectAttempts = 0;
-        
-        console.log(`Loaded ${serverData.ticks?.length || 0} ticks and ${serverData.dailyStats?.length || 0} daily stats from server`);
-      } else {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      } else throw new Error(`HTTP ${res.status}`);
     } catch (e) {
-      console.error('Failed to load history from server:', e);
+      console.error('Failed to load history:', e);
       reconnectAttempts++;
-      
-      // Fallback to localStorage for development
       try {
         const raw = localStorage.getItem(HISTORY_KEY);
-        history.set(raw ? JSON.parse(raw) : []);
-        console.log('Loaded history from localStorage fallback');
-      } catch {
-        history.set([]);
-      }
+        history.set(raw?JSON.parse(raw):[]);
+      } catch { history.set([]); }
     }
   }
 
-  async function saveTickToServer(ts: number, count: number, retryCount = 0) {
+  async function saveTickToServer(ts: number, count: number, retry=0) {
+    if (lastSent?.ts===ts && lastSent.count===count) return;
+    const $h = get(history);
+    if ($h.length && $h[$h.length-1].count===count) return;
     try {
-      // Skip if identical to last sent data
-      if (lastSentData?.ts === ts && lastSentData?.count === count) {
-        return;
-      }
-      
-      // Only save if count actually changed
-      if ($history.length > 0) {
-        const lastTick = $history[$history.length - 1];
-        if (lastTick.count === count) {
-          return;
-        }
-      }
-      
-      const response = await fetch('/api/tick', {
+      const res = await fetch('/api/tick', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ ts, count })
       });
-      
-      if (response.status === 429) {
-        const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
-        console.log(`Rate limited, waiting ${retryAfter}s before retry`);
-        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+      if (res.status===429) {
+        const delay = parseInt(res.headers.get('Retry-After')||'60')*1000;
+        await new Promise(r=>setTimeout(r,delay));
         return;
       }
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      
-      lastSentData = { ts, count };
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      lastSent = { ts, count };
       reconnectAttempts = 0;
-      
     } catch (e) {
-      console.error('Failed to save tick to server:', e);
-      
-      if (retryCount < 3) {
-        const delay = Math.pow(2, retryCount) * 1000;
-        console.log(`Retrying in ${delay}ms (attempt ${retryCount + 1}/3)`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return saveTickToServer(ts, count, retryCount + 1);
+      console.error('Failed saving tick:', e);
+      if (retry<3) {
+        await new Promise(r=>setTimeout(r, Math.pow(2,retry)*1000));
+        return saveTickToServer(ts,count,retry+1);
       }
-      
       reconnectAttempts++;
-      
-      // Fallback to localStorage
       try {
-        history.update(h => {
-          const next = [...h, { ts, count }];
-          localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-          return next;
-        });
-        console.log('Saved to localStorage fallback');
-      } catch (localErr) {
-        console.error('Failed to save to localStorage:', localErr);
-      }
-      
-      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.log('Too many failures, attempting to reload history...');
-        await loadHistory();
-        reconnectAttempts = 0;
-      }
+        history.update(h=>{ const n=[...h,{ts,count}]; localStorage.setItem(HISTORY_KEY,JSON.stringify(n)); return n; });
+      } catch {}
+      if (reconnectAttempts>=MAX_RECONNECT_ATTEMPTS) { await loadHistory(); reconnectAttempts=0; }
     }
   }
 
   async function tick() {
     try {
-      const [prog, infoJson] = await Promise.all([
-        fetch('https://eci.ec.europa.eu/045/public/api/report/progression').then(r => r.json()),
-        fetch('https://eci.ec.europa.eu/045/public/api/initiative/description').then(r => r.json())
+      const [progRes, infoRes] = await Promise.all([
+        fetch('https://eci.ec.europa.eu/045/public/api/report/progression'),
+        fetch('https://eci.ec.europa.eu/045/public/api/initiative/description')
       ]);
-      
+      const prog = await progRes.json();
+      const info = await infoRes.json();
+
       progression.set({ signatureCount: prog.signatureCount, goal: prog.goal });
       initiative.set({
-        registrationDate: infoJson.initiativeInfo.registrationDate,
-        closingDate:      infoJson.initiativeInfo.closingDate
+        registrationDate: info.initiativeInfo.registrationDate,
+        closingDate:      info.initiativeInfo.closingDate
       });
       error.set(null);
       lastUpdate.set(Date.now());
-      
+
       const nowTs = Date.now();
-      
-      // Save to server and update local state
       await saveTickToServer(nowTs, prog.signatureCount);
       history.update(h => [...h, { ts: nowTs, count: prog.signatureCount }]);
-      
     } catch (e) {
       error.set((e as Error).message);
       console.error('Tick error:', e);
     }
   }
 
-  // Helper functions (same as before)
-  function getConfidenceIndicator(dataPoints: number, type: 'perSec' | 'perMin' | 'perHour' | 'perDay') {
+  function getConfidenceIndicator(dp: number, type: 'perSec'|'perMin'|'perHour'|'perDay') {
     const thresholds = {
-      perSec: { good: 10, ok: 5 },
-      perMin: { good: 50, ok: 20 },
-      perHour: { good: 200, ok: 100 },
-      perDay: { good: 800, ok: 400 }
-    };
-    
-    const threshold = thresholds[type];
-    if (dataPoints >= threshold.good) return '✅';
-    if (dataPoints >= threshold.ok) return '⚠️';
+      perSec: { good:10, ok:5 },
+      perMin: { good:50, ok:20 },
+      perHour:{ good:200,ok:100 },
+      perDay: { good:800,ok:400 }
+    }[type];
+    if (dp>=thresholds.good) return '✅';
+    if (dp>=thresholds.ok)   return '⚠️';
     return '⏳';
   }
 
   function formatDuration(days: number): string {
-    if (days === Infinity) return 'Never at current rate';
-    
-    const totalDays = Math.ceil(days);
-    
-    if (totalDays > 365) {
-      const years = Math.floor(totalDays / 365);
-      const remainingDays = totalDays % 365;
-      if (remainingDays === 0) return `${years} year${years > 1 ? 's' : ''}`;
-      const months = Math.floor(remainingDays / 30);
-      if (months > 0) return `${years} year${years > 1 ? 's' : ''} ${months} month${months > 1 ? 's' : ''}`;
-      return `${years} year${years > 1 ? 's' : ''} ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    if (days===Infinity) return 'Never at current rate';
+    const td = Math.ceil(days);
+    if (td>365) {
+      const yrs = Math.floor(td/365), rem = td%365;
+      if (!rem) return `${yrs} year${yrs>1?'s':''}`;
+      const mos = Math.floor(rem/30);
+      if (!mos) return `${yrs} year${yrs>1?'s':''} ${rem} day${rem>1?'s':''}`;
+      return `${yrs} year${yrs>1?'s':''}${mos?` ${mos} month${mos>1?'s':''}`:''}`;
     }
-    
-    if (totalDays > 60) {
-      const months = Math.floor(totalDays / 30);
-      const remainingDays = totalDays % 30;
-      if (remainingDays === 0) return `${months} month${months > 1 ? 's' : ''}`;
-      return `${months} month${months > 1 ? 's' : ''} ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    if (td>60) {
+      const mos = Math.floor(td/30), rem=td%30;
+      return rem?`${mos} month${mos>1?'s':''} ${rem} day${rem>1?'s':''}`:`${mos} month${mos>1?'s':''}`;
     }
-    
-    if (totalDays > 30) {
-      const months = Math.floor(totalDays / 30);
-      const remainingDays = totalDays % 30;
-      return `1 month ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    if (td>14) {
+      const wks=Math.floor(td/7), rem=td%7;
+      return rem?`${wks} week${wks>1?'s':''} ${rem} day${rem>1?'s':''}`:`${wks} week${wks>1?'s':''}`;
     }
-    
-    if (totalDays > 14) {
-      const weeks = Math.floor(totalDays / 7);
-      const remainingDays = totalDays % 7;
-      if (remainingDays === 0) return `${weeks} week${weeks > 1 ? 's' : ''}`;
-      return `${weeks} week${weeks > 1 ? 's' : ''} ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
+    if (td>7) {
+      const rem=td%7;
+      return `1 week${rem?` ${rem} day${rem>1?'s':''}`:''}`;
     }
-    
-    if (totalDays > 7) {
-      const remainingDays = totalDays % 7;
-      return `1 week ${remainingDays} day${remainingDays > 1 ? 's' : ''}`;
-    }
-    
-    return `${totalDays} day${totalDays > 1 ? 's' : ''}`;
+    return `${td} day${td>1?'s':''}`;
   }
 
-  function formatDate(date: Date | null): string {
-    if (!date) return 'Unknown';
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
-      day: 'numeric', 
-      year: 'numeric' 
-    });
+  function formatDate(d: Date|null): string {
+    if (!d) return 'Unknown';
+    return d.toLocaleDateString('en-US',{ month:'short', day:'numeric', year:'numeric' });
   }
 
   function getConnectionStatus(): string {
-    if (reconnectAttempts > 0) return '🔄 Reconnecting...';
-    const timeSinceUpdate = Date.now() - $lastUpdate;
-    if (timeSinceUpdate > 10000) return '⚠️ Connection issue';
+    if (reconnectAttempts>0) return '🔄 Reconnecting...';
+    const since = Date.now()-get(lastUpdate);
+    if (since>10_000) return '⚠️ Connection issue';
     return '🟢 Live';
   }
 
-  // Share functionality with dynamic stats
   function shareApp() {
-    const shareText = `🎮 Stop Destroying Videogames petition: ${$progression.signatureCount.toLocaleString()} signatures! Gaining ${Math.round($rate.perHour)}/hour. Help reach ${$progression.goal.toLocaleString()}!`;
-    
+    const shareText = `🎮 Stop Destroying Videogames petition: ${get(progression).signatureCount.toLocaleString()} signatures! Gaining ${Math.round(get(rate).perHour)}/hour. Help reach ${get(progression).goal.toLocaleString()}!`;
     if (navigator.share) {
-      navigator.share({
-        title: 'Stop Destroying Videogames - Live Tracker',
-        text: shareText,
-        url: window.location.href
-      }).catch(console.error);
+      navigator.share({ title:'Stop Destroying Videogames - Live Tracker', text: shareText, url:window.location.href })
+        .catch(console.error);
     } else {
-      // Fallback: copy to clipboard
-      navigator.clipboard.writeText(`${shareText} ${window.location.href}`).then(() => {
-        alert('Share text copied to clipboard!');
-      }).catch(() => {
-        alert(`Share: ${shareText} ${window.location.href}`);
-      });
+      navigator.clipboard.writeText(`${shareText} ${window.location.href}`)
+        .then(()=>alert('Share text copied!'))
+        .catch(()=>alert(`Share: ${shareText} ${window.location.href}`));
     }
   }
 </script>
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
   <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-4 sm:space-y-6">
-    <!-- Header with connection status -->
     <div class="flex items-start justify-between gap-4">
       <h1 class="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 leading-tight">Stop Destroying Videogames</h1>
       <div class="flex items-center gap-2 shrink-0">
         <span class="text-xs text-gray-500 whitespace-nowrap">{getConnectionStatus()}</span>
-        <button 
-          on:click={shareApp}
-          class="p-2 text-gray-500 hover:text-blue-600 transition-colors"
-          title="Share this tracker"
-        >
-          📤
-        </button>
+        <button on:click={shareApp} class="p-2 text-gray-500 hover:text-blue-600 transition-colors" title="Share this tracker">📤</button>
       </div>
     </div>
 
     {#if $error}
       <div class="text-center p-4 bg-red-50 dark:bg-red-900/20 rounded-lg">
         <p class="text-red-600 dark:text-red-400">Error: {$error}</p>
-        <p class="text-xs text-red-500 dark:text-red-300 mt-1">
-          Retrying... ({reconnectAttempts}/{MAX_RECONNECT_ATTEMPTS})
-        </p>
+        <p class="text-xs text-red-500 dark:text-red-300 mt-1">Retrying... ({reconnectAttempts}/{MAX_RECONNECT_ATTEMPTS})</p>
       </div>
     {:else}
-      <!-- Yesterday's Performance (if available) -->
+
       {#if $yesterdayStats}
         <div class="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 space-y-2">
           <h3 class="font-semibold text-green-900 dark:text-green-100 text-sm">📈 Yesterday's Performance</h3>
@@ -530,7 +342,6 @@
         </div>
       {/if}
 
-      <!-- Live Rates with Confidence Indicators -->
       <div class="grid grid-cols-2 gap-4 text-sm text-gray-700 dark:text-gray-300">
         <div class="flex items-center justify-between">
           <span>Rate/sec:</span>
@@ -562,7 +373,6 @@
         </div>
       </div>
 
-      <!-- Projections (only show if daily rate is reliable) -->
       {#if $rate.dataPoints.perDay >= 100}
         <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 space-y-2">
           <h3 class="font-semibold text-blue-900 dark:text-blue-100 text-sm">📊 Projections</h3>
@@ -581,14 +391,11 @@
         </div>
       {/if}
 
-      <!-- Today's Stats (UTC-based) -->
       <div class="grid grid-cols-3 gap-4 text-sm text-gray-700 dark:text-gray-300 text-center">
         <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400">Votes Today (UTC)</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Votes Today (UTC+2)</div>
           <strong class="text-lg">{$todayData.collected.toLocaleString()}</strong>
-          <div class="text-xs text-gray-400 mt-1">
-            Resets in {$todayData.timeUntilResetText}
-          </div>
+          <div class="text-xs text-gray-400 mt-1">Resets in {$todayData.timeUntilResetText}</div>
         </div>
         <div>
           <div class="text-xs text-gray-500 dark:text-gray-400">Daily Quota</div>
@@ -608,22 +415,19 @@
         </div>
       </div>
 
-      <!-- Data Quality Indicator -->
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
         Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
       </div>
 
-      <!-- Original Progress & Time UI -->
       <div class="mt-4 grid grid-cols-2 gap-4 text-sm text-gray-600 dark:text-gray-400">
         <div><strong>Registered:</strong> {$initiative.registrationDate}</div>
         <div><strong>Closes:</strong> {$initiative.closingDate}</div>
       </div>
+
       <div class="space-y-2">
         <div class="flex justify-between items-baseline">
-          <span class="text-3xl font-mono text-blue-600 dark:text-blue-400">
-            {$progression.signatureCount.toLocaleString()}</span>
-          <span class="text-lg text-gray-500 dark:text-gray-400">
-            / {$progression.goal.toLocaleString()}</span>
+          <span class="text-3xl font-mono text-blue-600 dark:text-blue-400">{$progression.signatureCount.toLocaleString()}</span>
+          <span class="text-lg text-gray-500 dark:text-gray-400">/ {$progression.goal.toLocaleString()}</span>
         </div>
         <div class="relative h-4 bg-gray-300 dark:bg-gray-700 rounded-full overflow-hidden">
           <div
@@ -632,14 +436,16 @@
           ></div>
         </div>
         <div class="text-right text-sm text-gray-600 dark:text-gray-400">
-          {(Math.min(($progression.signatureCount / $progression.goal) * 100, 100)).toFixed(1)}%</div>
+          {(Math.min(($progression.signatureCount / $progression.goal) * 100, 100)).toFixed(1)}%
+        </div>
       </div>
+
       <div class="space-y-2">
         <div class="flex justify-between items-baseline">
-          <span class="text-base text-gray-700 dark:text-gray-300">
-            Time elapsed</span>
+          <span class="text-base text-gray-700 dark:text-gray-300">Time elapsed</span>
           <span class="text-sm text-gray-500 dark:text-gray-400">
-            {Math.floor((Date.now() - parseEUDate($initiative.registrationDate).getTime()) / MS_PER_DAY)} / {Math.ceil((parseEUDate($initiative.closingDate).getTime() - parseEUDate($initiative.registrationDate).getTime()) / MS_PER_DAY)} days</span>
+            {Math.floor((Date.now() - parseEUDate($initiative.registrationDate).getTime()) / MS_PER_DAY)} / {Math.ceil((parseEUDate($initiative.closingDate).getTime() - parseEUDate($initiative.registrationDate).getTime()) / MS_PER_DAY)} days
+          </span>
         </div>
         <div class="relative h-3 bg-gray-200 dark:bg-gray-600 rounded-full overflow-hidden">
           <div
@@ -648,25 +454,24 @@
           ></div>
         </div>
       </div>
+
       <div class="text-center text-sm text-gray-700 dark:text-gray-300">
         We need <span class="font-semibold">{(() => {
           const now = new Date(); const reg = parseEUDate($initiative.registrationDate);
           const close = parseEUDate($initiative.closingDate);
-          const totalDays = (close.getTime() - reg.getTime()) / MS_PER_DAY;
           const daysLeft = Math.max((close.getTime() - now.getTime()) / MS_PER_DAY, 0);
           const sigsLeft = $progression.goal - $progression.signatureCount;
           return (daysLeft>0 ? Math.ceil(sigsLeft / daysLeft) : sigsLeft).toLocaleString();
         })()}</span> signatures/day to reach <strong>{$progression.goal.toLocaleString()}</strong>.
       </div>
 
-      <!-- Historical Performance (if multiple days available) -->
       {#if $dailyStats.length > 1}
         <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4 space-y-2">
           <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm">📊 Recent Performance</h3>
           <div class="space-y-1 max-h-24 overflow-y-auto">
             {#each $dailyStats.slice(-3).reverse() as stat}
               <div class="flex justify-between items-center text-xs text-gray-600 dark:text-gray-400">
-                <span>{new Date(stat.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                <span>{new Date(stat.date).toLocaleDateString('en-US',{ month:'short', day:'numeric' })}</span>
                 <span class="font-semibold">{stat.signaturesCollected.toLocaleString()}</span>
               </div>
             {/each}
@@ -674,7 +479,6 @@
         </div>
       {/if}
 
-      <!-- Legend for confidence indicators -->
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center border-t pt-3">
         <div class="grid grid-cols-3 gap-2">
           <span>✅ Reliable</span>
@@ -683,17 +487,15 @@
         </div>
       </div>
 
-      <!-- Footer -->
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
-        <div>Live tracker • Updates every second • UTC timezone • Daily reset</div>
+        <div>Live tracker • Updates every second • UTC+2 timezone • Daily reset</div>
         <div class="mt-1">
-          <a href="https://eci.ec.europa.eu/045/public/" 
-             target="_blank" 
-             class="text-blue-500 hover:text-blue-600 transition-colors">
+          <a href="https://eci.ec.europa.eu/045/public/" target="_blank" class="text-blue-500 hover:text-blue-600 transition-colors">
             Sign the petition →
           </a>
         </div>
       </div>
+
     {/if}
   </div>
 </main>
