@@ -750,7 +750,7 @@
         })()}</span> signatures/day to reach <strong>{$progression.goal.toLocaleString()}</strong>.
       </div>
 
-      {#if $dailyStats.length > 1}
+      <!--{#if $dailyStats.length > 1}
         <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4 space-y-2">
           <h3 class="font-semibold text-gray-900 dark:text-gray-100 text-sm">📊 Recent Performance</h3>
           <div class="space-y-1 max-h-24 overflow-y-auto">
@@ -762,7 +762,7 @@
             {/each}
           </div>
         </div>
-      {/if}
+      {/if}-->
 
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center border-t pt-3">
         <div class="grid grid-cols-3 gap-2">
