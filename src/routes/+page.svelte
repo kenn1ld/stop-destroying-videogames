@@ -584,7 +584,7 @@
       <!-- Today's Stats (UTC-based) -->
       <div class="grid grid-cols-3 gap-4 text-sm text-gray-700 dark:text-gray-300 text-center">
         <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400">Collected Today (UTC)</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Votes Today (UTC)</div>
           <strong class="text-lg">{$todayData.collected.toLocaleString()}</strong>
           <div class="text-xs text-gray-400 mt-1">
             Resets in {$todayData.timeUntilResetText}
