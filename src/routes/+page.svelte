@@ -10,6 +10,7 @@
   interface DailyStat { date: string; signaturesCollected: number; startCount: number; endCount: number; dataPoints: number; }
 
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const MS_PER_HOUR = 60 * 60 * 1000;
   const TZ_OFFSET_MS = 2 * 60 * 60 * 1000; // UTC+2
 
   function parseEUDate(input: string): Date {
@@ -46,6 +47,7 @@
   const lastUpdate  = writable<number>(0);
   const history     = writable<Tick[]>([]);
   const dailyStats  = writable<DailyStat[]>([]);
+  const showAdvancedProjections = writable<boolean>(false);
 
   // yesterday's stats
   const yesterdayStats = derived(dailyStats, $s => {
@@ -90,6 +92,102 @@
     };
   });
 
+  // Advanced analytics for projections
+  const analytics = derived([dailyStats, history], ([$stats, $history]) => {
+    // Always try to provide analytics, even with minimal data
+    
+    // If we have no daily stats yet, provide basic analytics from current session
+    if ($stats.length === 0) {
+      // Use current rate data for initial projections
+      return {
+        avg7Day: 0,
+        avg14Day: 0,
+        avg30Day: 0,
+        dayOfWeekAvg: {},
+        momentum: 0,
+        volatility: 0,
+        best5DayAvg: 0,
+        worst5DayAvg: 0,
+        dataPoints: 0,
+        hasMinimalData: false
+      };
+    }
+    
+    // Calculate average daily signatures for different time periods
+    const last7Days = $stats.slice(-7);
+    const last14Days = $stats.slice(-14);
+    const last30Days = $stats.slice(-30);
+    
+    const avg7Day = last7Days.reduce((sum, s) => sum + s.signaturesCollected, 0) / last7Days.length;
+    const avg14Day = last14Days.reduce((sum, s) => sum + s.signaturesCollected, 0) / last14Days.length;
+    const avg30Day = last30Days.reduce((sum, s) => sum + s.signaturesCollected, 0) / last30Days.length;
+    
+    // Calculate day-of-week patterns
+    const dayOfWeekStats: { [key: number]: number[] } = {};
+    $stats.forEach(stat => {
+      const dow = new Date(stat.date).getDay();
+      if (!dayOfWeekStats[dow]) dayOfWeekStats[dow] = [];
+      dayOfWeekStats[dow].push(stat.signaturesCollected);
+    });
+    
+    const dayOfWeekAvg: { [key: number]: number } = {};
+    Object.entries(dayOfWeekStats).forEach(([dow, sigs]) => {
+      dayOfWeekAvg[parseInt(dow)] = sigs.reduce((a, b) => a + b, 0) / sigs.length;
+    });
+    
+    // Calculate trend (momentum)
+    const recentDays = $stats.slice(-Math.min(7, $stats.length));
+    let trendScore = 0;
+    for (let i = 1; i < recentDays.length; i++) {
+      if (recentDays[i].signaturesCollected > recentDays[i-1].signaturesCollected) {
+        trendScore += 1;
+      } else if (recentDays[i].signaturesCollected < recentDays[i-1].signaturesCollected) {
+        trendScore -= 1;
+      }
+    }
+    const momentum = recentDays.length > 1 ? trendScore / (recentDays.length - 1) : 0;
+    
+    // Calculate volatility (standard deviation)
+    if (last7Days.length >= 2) {
+      const mean = avg7Day;
+      const variance = last7Days.reduce((sum, s) => sum + Math.pow(s.signaturesCollected - mean, 2), 0) / last7Days.length;
+      const volatility = Math.sqrt(variance);
+      
+      // Best and worst days
+      const sortedStats = [...$stats].sort((a, b) => b.signaturesCollected - a.signaturesCollected);
+      const bestDays = sortedStats.slice(0, Math.min(5, sortedStats.length)).map(s => s.signaturesCollected);
+      const worstDays = sortedStats.slice(-Math.min(5, sortedStats.length)).map(s => s.signaturesCollected);
+      
+      return {
+        avg7Day,
+        avg14Day,
+        avg30Day,
+        dayOfWeekAvg,
+        momentum,
+        volatility,
+        best5DayAvg: bestDays.reduce((a, b) => a + b, 0) / bestDays.length,
+        worst5DayAvg: worstDays.reduce((a, b) => a + b, 0) / worstDays.length,
+        dataPoints: $stats.length,
+        hasMinimalData: true
+      };
+    } else {
+      // With only 1 day of data, use that day's data for all averages
+      const onlyDay = $stats[0].signaturesCollected;
+      return {
+        avg7Day: onlyDay,
+        avg14Day: onlyDay,
+        avg30Day: onlyDay,
+        dayOfWeekAvg,
+        momentum: 0,
+        volatility: 0,
+        best5DayAvg: onlyDay,
+        worst5DayAvg: onlyDay,
+        dataPoints: $stats.length,
+        hasMinimalData: true
+      };
+    }
+  });
+
   // today's collected (UTC+2) – reset automatically at local midnight
   const todayData = derived(history, $h => {
     const start      = getLocalStartOfDay();              // today 00:00 UTC+2
@@ -129,32 +227,134 @@
     }
   );
 
-  // projections - FIXED VERSION
-  const projections = derived([rate, progression, initiative], ([$rate,$prog,$init]) => {
-    const sigsLeft = $prog.goal - $prog.signatureCount;
-    let dailyQuota = 0;
-    if ($init.closingDate) {
-      const now = new Date(), close = parseEUDate($init.closingDate);
-      const daysLeft = Math.max((close.getTime()-now.getTime())/MS_PER_DAY, 0);
-      dailyQuota = daysLeft>0?Math.ceil(sigsLeft/daysLeft):sigsLeft;
+  // Advanced projections with multiple scenarios
+  const projections = derived([rate, progression, initiative, analytics, todayData], 
+    ([$rate, $prog, $init, $analytics, $today]) => {
+      const sigsLeft = $prog.goal - $prog.signatureCount;
+      let dailyQuota = 0;
+      let daysRemaining = 0;
+      
+      if ($init.closingDate) {
+        const now = new Date(), close = parseEUDate($init.closingDate);
+        daysRemaining = Math.max((close.getTime()-now.getTime())/MS_PER_DAY, 0);
+        dailyQuota = daysRemaining>0 ? Math.ceil(sigsLeft/daysRemaining) : sigsLeft;
+      }
+      
+      // Basic projections
+      const currentRatePerDay = $rate.perDay;
+      const daysToGoalAtCurrentRate = currentRatePerDay > 0 ? sigsLeft / currentRatePerDay : Infinity;
+      
+      // Advanced projections (always available, even with current rate only)
+      let scenarios = null;
+      
+      // If we have historical data, use it
+      if ($analytics && $analytics.hasMinimalData && $analytics.dataPoints >= 1) {
+        // Account for today's progress when projecting
+        const hoursLeftToday = (getLocalStartOfDay() + MS_PER_DAY - Date.now()) / MS_PER_HOUR;
+        const projectedTodayTotal = $today.collected + ($rate.perHour * hoursLeftToday);
+        
+        // Pessimistic: Worst 5-day average with negative momentum adjustment
+        const pessimisticDailyRate = $analytics.worst5DayAvg * (1 + Math.min($analytics.momentum, 0) * 0.2);
+        
+        // Realistic: Weighted average favoring recent performance
+        const realisticDailyRate = (
+          $analytics.avg7Day * 0.5 + 
+          $analytics.avg14Day * 0.3 + 
+          $analytics.avg30Day * 0.2
+        ) * (1 + $analytics.momentum * 0.1);
+        
+        // Optimistic: Best 5-day average with positive momentum boost
+        const optimisticDailyRate = $analytics.best5DayAvg * (1 + Math.max($analytics.momentum * 0.3, 0.1));
+        
+        // Current trend: Based on last 7 days with momentum
+        const trendDailyRate = $analytics.avg7Day * (1 + $analytics.momentum * 0.15);
+        
+        scenarios = {
+          pessimistic: {
+            dailyRate: Math.round(pessimisticDailyRate),
+            daysToGoal: sigsLeft / pessimisticDailyRate,
+            completionDate: new Date(Date.now() + (sigsLeft / pessimisticDailyRate) * MS_PER_DAY),
+            willComplete: (sigsLeft / pessimisticDailyRate) <= daysRemaining,
+            confidence: 90 // 90% chance we'll do better than this
+          },
+          realistic: {
+            dailyRate: Math.round(realisticDailyRate),
+            daysToGoal: sigsLeft / realisticDailyRate,
+            completionDate: new Date(Date.now() + (sigsLeft / realisticDailyRate) * MS_PER_DAY),
+            willComplete: (sigsLeft / realisticDailyRate) <= daysRemaining,
+            confidence: 50 // 50% chance of achieving this
+          },
+          optimistic: {
+            dailyRate: Math.round(optimisticDailyRate),
+            daysToGoal: sigsLeft / optimisticDailyRate,
+            completionDate: new Date(Date.now() + (sigsLeft / optimisticDailyRate) * MS_PER_DAY),
+            willComplete: (sigsLeft / optimisticDailyRate) <= daysRemaining,
+            confidence: 10 // 10% chance of achieving this
+          },
+          trend: {
+            dailyRate: Math.round(trendDailyRate),
+            daysToGoal: sigsLeft / trendDailyRate,
+            completionDate: new Date(Date.now() + (sigsLeft / trendDailyRate) * MS_PER_DAY),
+            willComplete: (sigsLeft / trendDailyRate) <= daysRemaining,
+            confidence: $analytics.momentum > 0 ? 60 : 40
+          }
+        };
+      } else if (currentRatePerDay > 0) {
+        // Even with no historical data, we can create projections based on current rate
+        // These will be less accurate but still useful
+        
+        // Use current rate as baseline
+        const baseRate = currentRatePerDay;
+        
+        // Create scenarios with wider uncertainty ranges due to limited data
+        scenarios = {
+          pessimistic: {
+            dailyRate: Math.round(baseRate * 0.5), // 50% of current rate
+            daysToGoal: sigsLeft / (baseRate * 0.5),
+            completionDate: new Date(Date.now() + (sigsLeft / (baseRate * 0.5)) * MS_PER_DAY),
+            willComplete: (sigsLeft / (baseRate * 0.5)) <= daysRemaining,
+            confidence: 90
+          },
+          realistic: {
+            dailyRate: Math.round(baseRate * 0.8), // 80% of current rate
+            daysToGoal: sigsLeft / (baseRate * 0.8),
+            completionDate: new Date(Date.now() + (sigsLeft / (baseRate * 0.8)) * MS_PER_DAY),
+            willComplete: (sigsLeft / (baseRate * 0.8)) <= daysRemaining,
+            confidence: 50
+          },
+          optimistic: {
+            dailyRate: Math.round(baseRate * 1.2), // 120% of current rate
+            daysToGoal: sigsLeft / (baseRate * 1.2),
+            completionDate: new Date(Date.now() + (sigsLeft / (baseRate * 1.2)) * MS_PER_DAY),
+            willComplete: (sigsLeft / (baseRate * 1.2)) <= daysRemaining,
+            confidence: 10
+          },
+          trend: {
+            dailyRate: Math.round(baseRate), // Current rate as trend
+            daysToGoal: sigsLeft / baseRate,
+            completionDate: new Date(Date.now() + (sigsLeft / baseRate) * MS_PER_DAY),
+            willComplete: (sigsLeft / baseRate) <= daysRemaining,
+            confidence: 30 // Lower confidence due to limited data
+          }
+        };
+      }
+      
+      return {
+        timeToGoal: {
+          atCurrentRate: daysToGoalAtCurrentRate,
+          atNeededRate: daysRemaining
+        },
+        projectedCompletion: {
+          current: currentRatePerDay > 0 ? new Date(Date.now() + daysToGoalAtCurrentRate * MS_PER_DAY) : null,
+          needed: dailyQuota > 0 ? new Date(Date.now() + daysRemaining * MS_PER_DAY) : null
+        },
+        dailyQuota,
+        daysRemaining,
+        scenarios,
+        analytics: $analytics
+      };
     }
-    
-    // Calculate days to goal
-    const daysToGoalAtCurrentRate = $rate.perDay > 0 ? sigsLeft / $rate.perDay : Infinity;
-    const daysToGoalAtNeededRate = dailyQuota > 0 ? sigsLeft / dailyQuota : Infinity;
-    
-    return {
-      timeToGoal: {
-        atCurrentRate: daysToGoalAtCurrentRate,
-        atNeededRate: daysToGoalAtNeededRate
-      },
-      projectedCompletion: {
-        current: $rate.perDay > 0 ? new Date(Date.now() + daysToGoalAtCurrentRate * MS_PER_DAY) : null,
-        needed: dailyQuota > 0 ? new Date(Date.now() + daysToGoalAtNeededRate * MS_PER_DAY) : null
-      },
-      dailyQuota
-    };
-  });
+  );
 
   let handle: ReturnType<typeof setInterval>|null = null;
   let reconnectAttempts = 0;
@@ -274,17 +474,14 @@
     return '⏳';
   }
 
-  // FIXED formatDuration function
   function formatDuration(days: number): string {
     if (days === Infinity) return 'Never at current rate';
     if (days < 0) return 'Already passed';
     
-    // Use the actual fractional days for more accurate calculation
     const totalDays = Math.floor(days);
     const totalHours = days * 24;
     
     if (totalDays === 0) {
-      // Less than a day - show hours
       const hours = Math.floor(totalHours);
       return hours === 0 ? 'Less than 1 hour' : `${hours} hour${hours !== 1 ? 's' : ''}`;
     }
@@ -306,7 +503,6 @@
       }
     }
     
-    // More than a year
     const years = Math.floor(totalDays / 365);
     const remainingDaysAfterYears = totalDays % 365;
     const months = Math.floor(remainingDaysAfterYears / 30);
@@ -331,6 +527,14 @@
   function getConnectionStatus(ageMs: number, reconnects: number): string {
     if (reconnects > 0) return '🔄 Reconnecting...';
     return ageMs > 10_000 ? '⚠️ Connection issue' : '🟢 Live';
+  }
+
+  function getMomentumEmoji(momentum: number): string {
+    if (momentum > 0.3) return '🚀';
+    if (momentum > 0.1) return '📈';
+    if (momentum > -0.1) return '➡️';
+    if (momentum > -0.3) return '📉';
+    return '📉';
   }
 
   function shareApp() {
@@ -415,19 +619,107 @@
 
       {#if $rate.dataPoints.perDay >= 100}
         <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 space-y-2">
-          <h3 class="font-semibold text-blue-900 dark:text-blue-100 text-sm">📊 Projections</h3>
-          <div class="grid grid-cols-2 gap-4 text-xs text-blue-800 dark:text-blue-200">
-            <div>
-              <div class="font-medium">At current rate:</div>
-              <div>{formatDuration($projections.timeToGoal.atCurrentRate)}</div>
-              <div class="text-blue-600 dark:text-blue-300">{formatDate($projections.projectedCompletion.current)}</div>
-            </div>
-            <div>
-              <div class="font-medium">If quota met daily:</div>
-              <div>{formatDuration($projections.timeToGoal.atNeededRate)}</div>
-              <div class="text-blue-600 dark:text-blue-300">{formatDate($projections.projectedCompletion.needed)}</div>
-            </div>
+          <div class="flex justify-between items-center">
+            <h3 class="font-semibold text-blue-900 dark:text-blue-100 text-sm">📊 Projections</h3>
+            {#if $projections.scenarios}
+              <button 
+                on:click={() => showAdvancedProjections.update(v => !v)}
+                class="text-xs text-blue-600 dark:text-blue-300 hover:underline"
+              >
+                {$showAdvancedProjections ? 'Show simple' : 'Show advanced'}
+              </button>
+            {/if}
           </div>
+          
+          {#if !$showAdvancedProjections || !$projections.scenarios}
+            <div class="grid grid-cols-2 gap-4 text-xs text-blue-800 dark:text-blue-200">
+              <div>
+                <div class="font-medium">At current rate:</div>
+                <div>{formatDuration($projections.timeToGoal.atCurrentRate)}</div>
+                <div class="text-blue-600 dark:text-blue-300">{formatDate($projections.projectedCompletion.current)}</div>
+              </div>
+              <div>
+                <div class="font-medium">If quota met daily:</div>
+                <div>{formatDuration($projections.timeToGoal.atNeededRate)}</div>
+                <div class="text-blue-600 dark:text-blue-300">{formatDate($projections.projectedCompletion.needed)}</div>
+              </div>
+            </div>
+          {:else if $projections.scenarios}
+            <div class="space-y-3">
+              {#if $projections.analytics}
+                <div class="text-xs text-blue-700 dark:text-blue-200 bg-blue-100 dark:bg-blue-800/30 rounded p-2">
+                  <div class="flex items-center justify-between">
+                    <span>Momentum: {getMomentumEmoji($projections.analytics.momentum)}</span>
+                    <span>7-day avg: {Math.round($projections.analytics.avg7Day).toLocaleString()}/day</span>
+                  </div>
+                </div>
+              {/if}
+              
+              <!-- Pessimistic Scenario -->
+              <div class="border-l-4 border-red-400 dark:border-red-600 pl-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-red-700 dark:text-red-300">Pessimistic (90% confidence)</span>
+                  <span class="text-xs text-gray-600 dark:text-gray-400">{$projections.scenarios.pessimistic.dailyRate.toLocaleString()}/day</span>
+                </div>
+                <div class="text-xs text-gray-700 dark:text-gray-300 mt-1">
+                  <div>{formatDuration($projections.scenarios.pessimistic.daysToGoal)}</div>
+                  <div class="{$projections.scenarios.pessimistic.willComplete ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}">
+                    {formatDate($projections.scenarios.pessimistic.completionDate)}
+                    {!$projections.scenarios.pessimistic.willComplete ? ' ⚠️' : ' ✓'}
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Realistic Scenario -->
+              <div class="border-l-4 border-yellow-400 dark:border-yellow-600 pl-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-yellow-700 dark:text-yellow-300">Realistic (50% confidence)</span>
+                  <span class="text-xs text-gray-600 dark:text-gray-400">{$projections.scenarios.realistic.dailyRate.toLocaleString()}/day</span>
+                </div>
+                <div class="text-xs text-gray-700 dark:text-gray-300 mt-1">
+                  <div>{formatDuration($projections.scenarios.realistic.daysToGoal)}</div>
+                  <div class="{$projections.scenarios.realistic.willComplete ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}">
+                    {formatDate($projections.scenarios.realistic.completionDate)}
+                    {!$projections.scenarios.realistic.willComplete ? ' ⚠️' : ' ✓'}
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Trend-based Scenario -->
+              <div class="border-l-4 border-purple-400 dark:border-purple-600 pl-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-purple-700 dark:text-purple-300">Current Trend ({$projections.scenarios.trend.confidence}% confidence)</span>
+                  <span class="text-xs text-gray-600 dark:text-gray-400">{$projections.scenarios.trend.dailyRate.toLocaleString()}/day</span>
+                </div>
+                <div class="text-xs text-gray-700 dark:text-gray-300 mt-1">
+                  <div>{formatDuration($projections.scenarios.trend.daysToGoal)}</div>
+                  <div class="{$projections.scenarios.trend.willComplete ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}">
+                    {formatDate($projections.scenarios.trend.completionDate)}
+                    {!$projections.scenarios.trend.willComplete ? ' ⚠️' : ' ✓'}
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Optimistic Scenario -->
+              <div class="border-l-4 border-green-400 dark:border-green-600 pl-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-green-700 dark:text-green-300">Optimistic (10% confidence)</span>
+                  <span class="text-xs text-gray-600 dark:text-gray-400">{$projections.scenarios.optimistic.dailyRate.toLocaleString()}/day</span>
+                </div>
+                <div class="text-xs text-gray-700 dark:text-gray-300 mt-1">
+                  <div>{formatDuration($projections.scenarios.optimistic.daysToGoal)}</div>
+                  <div class="{$projections.scenarios.optimistic.willComplete ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}">
+                    {formatDate($projections.scenarios.optimistic.completionDate)}
+                    {!$projections.scenarios.optimistic.willComplete ? ' ⚠️' : ' ✓'}
+                  </div>
+                </div>
+              </div>
+              
+              <div class="text-xs text-gray-500 dark:text-gray-400 text-center mt-2 pt-2 border-t border-gray-200 dark:border-gray-600">
+                {$projections.daysRemaining.toFixed(0)} days until deadline • Need {$projections.dailyQuota.toLocaleString()}/day
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
 
@@ -454,6 +746,34 @@
           <strong class="text-lg">{$history.length}</strong>
         </div>
       </div>
+
+      {#if $projections.analytics && $showAdvancedProjections && $projections.analytics.hasMinimalData}
+        <div class="bg-gray-50 dark:bg-gray-700/30 rounded-lg p-3 space-y-2">
+          <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">📊 Performance Analytics</h4>
+          <div class="grid grid-cols-2 gap-2 text-xs text-gray-600 dark:text-gray-400">
+            <div>
+              <span class="font-medium">30-day avg:</span>
+              <span class="float-right">{Math.round($projections.analytics.avg30Day).toLocaleString()}/day</span>
+            </div>
+            <div>
+              <span class="font-medium">14-day avg:</span>
+              <span class="float-right">{Math.round($projections.analytics.avg14Day).toLocaleString()}/day</span>
+            </div>
+            <div>
+              <span class="font-medium">Best 5-day avg:</span>
+              <span class="float-right">{Math.round($projections.analytics.best5DayAvg).toLocaleString()}/day</span>
+            </div>
+            <div>
+              <span class="font-medium">Worst 5-day avg:</span>
+              <span class="float-right">{Math.round($projections.analytics.worst5DayAvg).toLocaleString()}/day</span>
+            </div>
+            <div class="col-span-2">
+              <span class="font-medium">Volatility (σ):</span>
+              <span class="float-right">±{Math.round($projections.analytics.volatility).toLocaleString()} signatures/day</span>
+            </div>
+          </div>
+        </div>
+      {/if}
 
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
         Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
