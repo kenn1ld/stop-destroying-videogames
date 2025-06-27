@@ -47,7 +47,7 @@
   const history     = writable<Tick[]>([]);
   const dailyStats  = writable<DailyStat[]>([]);
 
-  // yesterday’s stats
+  // yesterday's stats
   const yesterdayStats = derived(dailyStats, $s => {
     return $s.find(st => st.date === getYesterdayDateString()) || null;
   });
@@ -90,32 +90,31 @@
     };
   });
 
-  // today’s collected (UTC+2) – reset automatically at local midnight
-const todayData = derived(history, $h => {
-  const start      = getLocalStartOfDay();              // today 00:00 UTC+2
-  const todayTicks = $h.filter(t => t.ts >= start)       // ignore yesterday’s ticks
-                       .sort((a, b) => a.ts - b.ts);
+  // today's collected (UTC+2) – reset automatically at local midnight
+  const todayData = derived(history, $h => {
+    const start      = getLocalStartOfDay();              // today 00:00 UTC+2
+    const todayTicks = $h.filter(t => t.ts >= start)       // ignore yesterday's ticks
+                         .sort((a, b) => a.ts - b.ts);
 
-  const baselineKnown = todayTicks.length > 0;
-  const baseline      = baselineKnown ? todayTicks[0].count : 0;
-  const last          = baselineKnown
-                         ? todayTicks[todayTicks.length - 1].count
-                         : baseline;
+    const baselineKnown = todayTicks.length > 0;
+    const baseline      = baselineKnown ? todayTicks[0].count : 0;
+    const last          = baselineKnown
+                           ? todayTicks[todayTicks.length - 1].count
+                           : baseline;
 
-  const collected     = last - baseline;
+    const collected     = last - baseline;
 
-  const msUntilReset  = Math.max(0, start + MS_PER_DAY - Date.now());
-  const hrs           = Math.floor(msUntilReset / 3_600_000);
-  const mins          = Math.floor((msUntilReset % 3_600_000) / 60_000);
+    const msUntilReset  = Math.max(0, start + MS_PER_DAY - Date.now());
+    const hrs           = Math.floor(msUntilReset / 3_600_000);
+    const mins          = Math.floor((msUntilReset % 3_600_000) / 60_000);
 
-  return {
-    collected,
-    utcStartOfDay: start,
-    timeUntilResetText: `${hrs}h ${mins}m`,
-    baselineKnown
-  };
-});
-
+    return {
+      collected,
+      utcStartOfDay: start,
+      timeUntilResetText: `${hrs}h ${mins}m`,
+      baselineKnown
+    };
+  });
 
   // daily quota met?
   const metToday = derived(
@@ -130,7 +129,7 @@ const todayData = derived(history, $h => {
     }
   );
 
-  // projections
+  // projections - FIXED VERSION
   const projections = derived([rate, progression, initiative], ([$rate,$prog,$init]) => {
     const sigsLeft = $prog.goal - $prog.signatureCount;
     let dailyQuota = 0;
@@ -139,14 +138,19 @@ const todayData = derived(history, $h => {
       const daysLeft = Math.max((close.getTime()-now.getTime())/MS_PER_DAY, 0);
       dailyQuota = daysLeft>0?Math.ceil(sigsLeft/daysLeft):sigsLeft;
     }
+    
+    // Calculate days to goal
+    const daysToGoalAtCurrentRate = $rate.perDay > 0 ? sigsLeft / $rate.perDay : Infinity;
+    const daysToGoalAtNeededRate = dailyQuota > 0 ? sigsLeft / dailyQuota : Infinity;
+    
     return {
       timeToGoal: {
-        atCurrentRate: $rate.perDay>0?Math.ceil(sigsLeft/$rate.perDay):Infinity,
-        atNeededRate: dailyQuota>0?Math.ceil(sigsLeft/dailyQuota):Infinity
+        atCurrentRate: daysToGoalAtCurrentRate,
+        atNeededRate: daysToGoalAtNeededRate
       },
       projectedCompletion: {
-        current: $rate.perDay>0?new Date(Date.now() + (sigsLeft/$rate.perDay)*MS_PER_DAY):null,
-        needed: dailyQuota>0?new Date(Date.now() + (sigsLeft/dailyQuota)*MS_PER_DAY):null
+        current: $rate.perDay > 0 ? new Date(Date.now() + daysToGoalAtCurrentRate * MS_PER_DAY) : null,
+        needed: dailyQuota > 0 ? new Date(Date.now() + daysToGoalAtNeededRate * MS_PER_DAY) : null
       },
       dailyQuota
     };
@@ -270,29 +274,53 @@ const todayData = derived(history, $h => {
     return '⏳';
   }
 
+  // FIXED formatDuration function
   function formatDuration(days: number): string {
-    if (days===Infinity) return 'Never at current rate';
-    const td = Math.ceil(days);
-    if (td>365) {
-      const yrs = Math.floor(td/365), rem = td%365;
-      if (!rem) return `${yrs} year${yrs>1?'s':''}`;
-      const mos = Math.floor(rem/30);
-      if (!mos) return `${yrs} year${yrs>1?'s':''} ${rem} day${rem>1?'s':''}`;
-      return `${yrs} year${yrs>1?'s':''}${mos?` ${mos} month${mos>1?'s':''}`:''}`;
+    if (days === Infinity) return 'Never at current rate';
+    if (days < 0) return 'Already passed';
+    
+    // Use the actual fractional days for more accurate calculation
+    const totalDays = Math.floor(days);
+    const totalHours = days * 24;
+    
+    if (totalDays === 0) {
+      // Less than a day - show hours
+      const hours = Math.floor(totalHours);
+      return hours === 0 ? 'Less than 1 hour' : `${hours} hour${hours !== 1 ? 's' : ''}`;
     }
-    if (td>60) {
-      const mos = Math.floor(td/30), rem=td%30;
-      return rem?`${mos} month${mos>1?'s':''} ${rem} day${rem>1?'s':''}`:`${mos} month${mos>1?'s':''}`;
+    
+    if (totalDays < 7) {
+      return `${totalDays} day${totalDays !== 1 ? 's' : ''}`;
     }
-    if (td>14) {
-      const wks=Math.floor(td/7), rem=td%7;
-      return rem?`${wks} week${wks>1?'s':''} ${rem} day${rem>1?'s':''}`:`${wks} week${wks>1?'s':''}`;
+    
+    if (totalDays < 365) {
+      const weeks = Math.floor(totalDays / 7);
+      const remainingDays = totalDays % 7;
+      
+      if (weeks === 0) {
+        return `${totalDays} day${totalDays !== 1 ? 's' : ''}`;
+      } else if (remainingDays === 0) {
+        return `${weeks} week${weeks !== 1 ? 's' : ''}`;
+      } else {
+        return `${weeks} week${weeks !== 1 ? 's' : ''} ${remainingDays} day${remainingDays !== 1 ? 's' : ''}`;
+      }
     }
-    if (td>7) {
-      const rem=td%7;
-      return `1 week${rem?` ${rem} day${rem>1?'s':''}`:''}`;
+    
+    // More than a year
+    const years = Math.floor(totalDays / 365);
+    const remainingDaysAfterYears = totalDays % 365;
+    const months = Math.floor(remainingDaysAfterYears / 30);
+    const remainingDaysAfterMonths = remainingDaysAfterYears % 30;
+    
+    let result = `${years} year${years !== 1 ? 's' : ''}`;
+    if (months > 0) {
+      result += ` ${months} month${months !== 1 ? 's' : ''}`;
     }
-    return `${td} day${td>1?'s':''}`;
+    if (remainingDaysAfterMonths > 0 && months === 0) {
+      result += ` ${remainingDaysAfterMonths} day${remainingDaysAfterMonths !== 1 ? 's' : ''}`;
+    }
+    
+    return result;
   }
 
   function formatDate(d: Date|null): string {
@@ -300,10 +328,10 @@ const todayData = derived(history, $h => {
     return d.toLocaleDateString('en-US',{ month:'short', day:'numeric', year:'numeric' });
   }
 
-    function getConnectionStatus(ageMs: number, reconnects: number): string {
-    if (reconnects > 0)              return '🔄 Reconnecting...';
+  function getConnectionStatus(ageMs: number, reconnects: number): string {
+    if (reconnects > 0) return '🔄 Reconnecting...';
     return ageMs > 10_000 ? '⚠️ Connection issue' : '🟢 Live';
-    }
+  }
 
   function shareApp() {
     const shareText = `🎮 Stop Destroying Videogames petition: ${get(progression).signatureCount.toLocaleString()} signatures! Gaining ${Math.round(get(rate).perHour)}/hour. Help reach ${get(progression).goal.toLocaleString()}!`;
