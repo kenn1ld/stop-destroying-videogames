@@ -391,7 +391,7 @@
 
       <div class="grid grid-cols-3 gap-4 text-sm text-gray-700 dark:text-gray-300 text-center">
         <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400">Votes Today (UTC+2)</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400">Signatures Today (UTC+2)</div>
           <strong class="text-lg">{$todayData.collected.toLocaleString()}</strong>
           <div class="text-xs text-gray-400 mt-1">Resets in {$todayData.timeUntilResetText}</div>
         </div>
