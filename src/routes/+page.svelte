@@ -90,18 +90,32 @@
     };
   });
 
-  // today’s collected (UTC+2)
-  const todayData = derived(history, $h => {
-    const start = getLocalStartOfDay();
-    const all   = [...$h].sort((a,b)=>a.ts-b.ts);
-    const baseline = all.length ? all[0].count : 0;
-    const last = all.length ? all[all.length-1].count : baseline;
-    const collected = last - baseline;
-    const msUntilReset = Math.max(0, start + MS_PER_DAY - Date.now());
-    const hrs = Math.floor(msUntilReset / 3_600_000);
-    const mins = Math.floor((msUntilReset % 3_600_000) / 60_000);
-    return { collected, utcStartOfDay: start, timeUntilResetText: `${hrs}h ${mins}m`, baselineKnown: all.length>0 };
-  });
+  // today’s collected (UTC+2) – reset automatically at local midnight
+const todayData = derived(history, $h => {
+  const start      = getLocalStartOfDay();              // today 00:00 UTC+2
+  const todayTicks = $h.filter(t => t.ts >= start)       // ignore yesterday’s ticks
+                       .sort((a, b) => a.ts - b.ts);
+
+  const baselineKnown = todayTicks.length > 0;
+  const baseline      = baselineKnown ? todayTicks[0].count : 0;
+  const last          = baselineKnown
+                         ? todayTicks[todayTicks.length - 1].count
+                         : baseline;
+
+  const collected     = last - baseline;
+
+  const msUntilReset  = Math.max(0, start + MS_PER_DAY - Date.now());
+  const hrs           = Math.floor(msUntilReset / 3_600_000);
+  const mins          = Math.floor((msUntilReset % 3_600_000) / 60_000);
+
+  return {
+    collected,
+    utcStartOfDay: start,
+    timeUntilResetText: `${hrs}h ${mins}m`,
+    baselineKnown
+  };
+});
+
 
   // daily quota met?
   const metToday = derived(
