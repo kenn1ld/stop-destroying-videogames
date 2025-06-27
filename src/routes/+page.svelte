@@ -59,7 +59,7 @@
       perSec: 30 * 1000,
       perMin: 5 * 60 * 1000,
       perHour: 30 * 60 * 1000,
-      perDay: 4 * 60 * 60 * 1000
+      perDay: 12 * 60 * 60 * 1000
     };
     function calc(w: number, unit: number) {
       const wTicks = $h.filter(t => now - t.ts <= w).sort((a,b)=>a.ts-b.ts);
@@ -263,7 +263,7 @@ const todayData = derived(history, $h => {
       perSec: { good:10, ok:5 },
       perMin: { good:50, ok:20 },
       perHour:{ good:200,ok:100 },
-      perDay: { good:800,ok:400 }
+      perDay: { good: 2_400, ok: 1_200 }
     }[type];
     if (dp>=thresholds.good) return '✅';
     if (dp>=thresholds.ok)   return '⚠️';
