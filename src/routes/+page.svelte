@@ -58,8 +58,8 @@
     const WINDOWS = {
       perSec: 30 * 1000,
       perMin: 5 * 60 * 1000,
-      perHour: 30 * 60 * 1000,
-      perDay: 12 * 60 * 60 * 1000
+      perHour: 60 * 60 * 1000,
+      perDay: 24 * 60 * 60 * 1000
     };
     function calc(w: number, unit: number) {
       const wTicks = $h.filter(t => now - t.ts <= w).sort((a,b)=>a.ts-b.ts);
