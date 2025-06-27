@@ -286,12 +286,10 @@
     return d.toLocaleDateString('en-US',{ month:'short', day:'numeric', year:'numeric' });
   }
 
-  function getConnectionStatus(): string {
-    if (reconnectAttempts>0) return '🔄 Reconnecting...';
-    const since = Date.now()-get(lastUpdate);
-    if (since>10_000) return '⚠️ Connection issue';
-    return '🟢 Live';
-  }
+    function getConnectionStatus(ageMs: number, reconnects: number): string {
+    if (reconnects > 0)              return '🔄 Reconnecting...';
+    return ageMs > 10_000 ? '⚠️ Connection issue' : '🟢 Live';
+    }
 
   function shareApp() {
     const shareText = `🎮 Stop Destroying Videogames petition: ${get(progression).signatureCount.toLocaleString()} signatures! Gaining ${Math.round(get(rate).perHour)}/hour. Help reach ${get(progression).goal.toLocaleString()}!`;
@@ -311,7 +309,7 @@
     <div class="flex items-start justify-between gap-4">
       <h1 class="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 leading-tight">Stop Destroying Videogames</h1>
       <div class="flex items-center gap-2 shrink-0">
-        <span class="text-xs text-gray-500 whitespace-nowrap">{getConnectionStatus()}</span>
+        <span class="text-xs text-gray-500 whitespace-nowrap">{getConnectionStatus(Date.now() - $lastUpdate, reconnectAttempts)}</span>
         <button on:click={shareApp} class="p-2 text-gray-500 hover:text-blue-600 transition-colors" title="Share this tracker">📤</button>
       </div>
     </div>
