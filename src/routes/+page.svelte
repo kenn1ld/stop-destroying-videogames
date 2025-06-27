@@ -492,7 +492,7 @@
       </div>
     {:else}
 
-      {#if $yesterdayStats}
+      <!--{#if $yesterdayStats}
         <div class="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 space-y-2">
           <h3 class="font-semibold text-green-900 dark:text-green-100 text-sm">📈 Yesterday's Performance</h3>
           <div class="grid grid-cols-2 gap-4 text-xs text-green-800 dark:text-green-200">
@@ -509,7 +509,7 @@
             From {$yesterdayStats.startCount.toLocaleString()} to {$yesterdayStats.endCount.toLocaleString()}
           </div>
         </div>
-      {/if}
+      {/if}-->
 
       <div class="grid grid-cols-2 gap-4 text-sm text-gray-700 dark:text-gray-300">
         <div class="flex items-center justify-between">
