@@ -94,24 +94,7 @@
 
   // Advanced analytics for projections
   const analytics = derived([dailyStats, history], ([$stats, $history]) => {
-    // Always try to provide analytics, even with minimal data
-    
-    // If we have no daily stats yet, provide basic analytics from current session
-    if ($stats.length === 0) {
-      // Use current rate data for initial projections
-      return {
-        avg7Day: 0,
-        avg14Day: 0,
-        avg30Day: 0,
-        dayOfWeekAvg: {},
-        momentum: 0,
-        volatility: 0,
-        best5DayAvg: 0,
-        worst5DayAvg: 0,
-        dataPoints: 0,
-        hasMinimalData: false
-      };
-    }
+    if ($stats.length < 3) return null;
     
     // Calculate average daily signatures for different time periods
     const last7Days = $stats.slice(-7);
@@ -136,7 +119,7 @@
     });
     
     // Calculate trend (momentum)
-    const recentDays = $stats.slice(-Math.min(7, $stats.length));
+    const recentDays = $stats.slice(-7);
     let trendScore = 0;
     for (let i = 1; i < recentDays.length; i++) {
       if (recentDays[i].signaturesCollected > recentDays[i-1].signaturesCollected) {
@@ -145,47 +128,29 @@
         trendScore -= 1;
       }
     }
-    const momentum = recentDays.length > 1 ? trendScore / (recentDays.length - 1) : 0;
+    const momentum = trendScore / Math.max(recentDays.length - 1, 1);
     
     // Calculate volatility (standard deviation)
-    if (last7Days.length >= 2) {
-      const mean = avg7Day;
-      const variance = last7Days.reduce((sum, s) => sum + Math.pow(s.signaturesCollected - mean, 2), 0) / last7Days.length;
-      const volatility = Math.sqrt(variance);
-      
-      // Best and worst days
-      const sortedStats = [...$stats].sort((a, b) => b.signaturesCollected - a.signaturesCollected);
-      const bestDays = sortedStats.slice(0, Math.min(5, sortedStats.length)).map(s => s.signaturesCollected);
-      const worstDays = sortedStats.slice(-Math.min(5, sortedStats.length)).map(s => s.signaturesCollected);
-      
-      return {
-        avg7Day,
-        avg14Day,
-        avg30Day,
-        dayOfWeekAvg,
-        momentum,
-        volatility,
-        best5DayAvg: bestDays.reduce((a, b) => a + b, 0) / bestDays.length,
-        worst5DayAvg: worstDays.reduce((a, b) => a + b, 0) / worstDays.length,
-        dataPoints: $stats.length,
-        hasMinimalData: true
-      };
-    } else {
-      // With only 1 day of data, use that day's data for all averages
-      const onlyDay = $stats[0].signaturesCollected;
-      return {
-        avg7Day: onlyDay,
-        avg14Day: onlyDay,
-        avg30Day: onlyDay,
-        dayOfWeekAvg,
-        momentum: 0,
-        volatility: 0,
-        best5DayAvg: onlyDay,
-        worst5DayAvg: onlyDay,
-        dataPoints: $stats.length,
-        hasMinimalData: true
-      };
-    }
+    const mean = avg7Day;
+    const variance = last7Days.reduce((sum, s) => sum + Math.pow(s.signaturesCollected - mean, 2), 0) / last7Days.length;
+    const volatility = Math.sqrt(variance);
+    
+    // Best and worst days
+    const sortedStats = [...$stats].sort((a, b) => b.signaturesCollected - a.signaturesCollected);
+    const best5Days = sortedStats.slice(0, 5).map(s => s.signaturesCollected);
+    const worst5Days = sortedStats.slice(-5).map(s => s.signaturesCollected);
+    
+    return {
+      avg7Day,
+      avg14Day,
+      avg30Day,
+      dayOfWeekAvg,
+      momentum,
+      volatility,
+      best5DayAvg: best5Days.reduce((a, b) => a + b, 0) / best5Days.length,
+      worst5DayAvg: worst5Days.reduce((a, b) => a + b, 0) / worst5Days.length,
+      dataPoints: $stats.length
+    };
   });
 
   // today's collected (UTC+2) – reset automatically at local midnight
@@ -244,11 +209,9 @@
       const currentRatePerDay = $rate.perDay;
       const daysToGoalAtCurrentRate = currentRatePerDay > 0 ? sigsLeft / currentRatePerDay : Infinity;
       
-      // Advanced projections (always available, even with current rate only)
+      // Advanced projections (if we have enough data)
       let scenarios = null;
-      
-      // If we have historical data, use it
-      if ($analytics && $analytics.hasMinimalData && $analytics.dataPoints >= 1) {
+      if ($analytics && $analytics.dataPoints >= 7) {
         // Account for today's progress when projecting
         const hoursLeftToday = (getLocalStartOfDay() + MS_PER_DAY - Date.now()) / MS_PER_HOUR;
         const projectedTodayTotal = $today.collected + ($rate.perHour * hoursLeftToday);
@@ -297,44 +260,6 @@
             completionDate: new Date(Date.now() + (sigsLeft / trendDailyRate) * MS_PER_DAY),
             willComplete: (sigsLeft / trendDailyRate) <= daysRemaining,
             confidence: $analytics.momentum > 0 ? 60 : 40
-          }
-        };
-      } else if (currentRatePerDay > 0) {
-        // Even with no historical data, we can create projections based on current rate
-        // These will be less accurate but still useful
-        
-        // Use current rate as baseline
-        const baseRate = currentRatePerDay;
-        
-        // Create scenarios with wider uncertainty ranges due to limited data
-        scenarios = {
-          pessimistic: {
-            dailyRate: Math.round(baseRate * 0.5), // 50% of current rate
-            daysToGoal: sigsLeft / (baseRate * 0.5),
-            completionDate: new Date(Date.now() + (sigsLeft / (baseRate * 0.5)) * MS_PER_DAY),
-            willComplete: (sigsLeft / (baseRate * 0.5)) <= daysRemaining,
-            confidence: 90
-          },
-          realistic: {
-            dailyRate: Math.round(baseRate * 0.8), // 80% of current rate
-            daysToGoal: sigsLeft / (baseRate * 0.8),
-            completionDate: new Date(Date.now() + (sigsLeft / (baseRate * 0.8)) * MS_PER_DAY),
-            willComplete: (sigsLeft / (baseRate * 0.8)) <= daysRemaining,
-            confidence: 50
-          },
-          optimistic: {
-            dailyRate: Math.round(baseRate * 1.2), // 120% of current rate
-            daysToGoal: sigsLeft / (baseRate * 1.2),
-            completionDate: new Date(Date.now() + (sigsLeft / (baseRate * 1.2)) * MS_PER_DAY),
-            willComplete: (sigsLeft / (baseRate * 1.2)) <= daysRemaining,
-            confidence: 10
-          },
-          trend: {
-            dailyRate: Math.round(baseRate), // Current rate as trend
-            daysToGoal: sigsLeft / baseRate,
-            completionDate: new Date(Date.now() + (sigsLeft / baseRate) * MS_PER_DAY),
-            willComplete: (sigsLeft / baseRate) <= daysRemaining,
-            confidence: 30 // Lower confidence due to limited data
           }
         };
       }
@@ -747,7 +672,7 @@
         </div>
       </div>
 
-      {#if $projections.analytics && $showAdvancedProjections && $projections.analytics.hasMinimalData}
+      {#if $projections.analytics && $showAdvancedProjections}
         <div class="bg-gray-50 dark:bg-gray-700/30 rounded-lg p-3 space-y-2">
           <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">📊 Performance Analytics</h4>
           <div class="grid grid-cols-2 gap-2 text-xs text-gray-600 dark:text-gray-400">
