@@ -175,7 +175,8 @@
       collected,
       utcStartOfDay: start,
       timeUntilResetText: `${hrs}h ${mins}m`,
-      baselineKnown
+      baselineKnown,
+      dataPointsToday: todayTicks.length
     };
   });
 
