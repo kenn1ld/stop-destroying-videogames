@@ -312,8 +312,14 @@
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.ticks)) {
+          // The backend now only sends last 7 days of data
           history.set(data.ticks);
           dailyStats.set(data.dailyStats||[]);
+          
+          // Log metadata for debugging if needed
+          if (data.metadata) {
+            console.log('Tick history metadata:', data.metadata);
+          }
         } else {
           history.set([]);
         }
@@ -325,7 +331,11 @@
       reconnectAttempts++;
       try {
         const raw = localStorage.getItem(HISTORY_KEY);
-        history.set(raw?JSON.parse(raw):[]);
+        const stored = raw?JSON.parse(raw):[];
+        // Filter localStorage data to match backend behavior (last 7 days only)
+        const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        const filtered = stored.filter((t: {ts: number, count: number}) => t.ts >= sevenDaysAgo);
+        history.set(filtered);
       } catch { history.set([]); }
     }
   }
@@ -345,6 +355,11 @@
         await new Promise(r=>setTimeout(r,delay));
         return;
       }
+      if (res.status===503) {
+        // Server busy (file locked), retry after short delay
+        await new Promise(r=>setTimeout(r,1000));
+        return saveTickToServer(ts,count,retry+1);
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       lastSent = { ts, count };
       reconnectAttempts = 0;
@@ -356,7 +371,13 @@
       }
       reconnectAttempts++;
       try {
-        history.update(h=>{ const n=[...h,{ts,count}]; localStorage.setItem(HISTORY_KEY,JSON.stringify(n)); return n; });
+        history.update(h=>{ 
+          // Only store last 7 days in localStorage to match backend
+          const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+          const filtered = [...h,{ts,count}].filter(t => t.ts >= sevenDaysAgo);
+          localStorage.setItem(HISTORY_KEY,JSON.stringify(filtered)); 
+          return filtered; 
+        });
       } catch {}
       if (reconnectAttempts>=MAX_RECONNECT_ATTEMPTS) { await loadHistory(); reconnectAttempts=0; }
     }
@@ -669,7 +690,7 @@
         </div>
         <div>
           <div class="text-xs text-gray-500 dark:text-gray-400">Today's Data Points</div>
-          <strong class="text-lg">{$history.length}</strong>
+          <strong class="text-lg">{$todayData.dataPointsToday}</strong>
         </div>
       </div>
 
