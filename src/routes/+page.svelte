@@ -384,7 +384,7 @@
       if (lastETag) headers['If-None-Match'] = lastETag;
       
       // Limit initial load to prevent memory issues
-      const res = await fetch('/api/tick-history?limit=3600&compress=true', { headers });
+      const res = await fetch('/api/tick-history?limit=86400&compress=true', { headers });
       
       if (res.status === 304) { 
         reconnectAttempts = 0; 
