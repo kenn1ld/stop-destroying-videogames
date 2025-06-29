@@ -61,10 +61,10 @@ async function ensureTable() {
       ON signatures(timestamp)
     `);
     
+    // Composite index for timestamp range queries (replaces partial index)
     await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_signatures_recent 
-      ON signatures(timestamp) 
-      WHERE timestamp > extract(epoch from now() - interval '2 hours') * 1000
+      CREATE INDEX IF NOT EXISTS idx_signatures_timestamp_desc 
+      ON signatures(timestamp DESC)
     `);
     
     tableEnsured = true;
