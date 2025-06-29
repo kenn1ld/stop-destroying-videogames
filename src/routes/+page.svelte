@@ -11,9 +11,7 @@
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
   const MS_PER_HOUR = 60 * 60 * 1000;
   const TZ_OFFSET_MS = 2 * 60 * 60 * 1000; // UTC+2
-  const RETENTION_MS = 26 * 60 * 60 * 1000; // Match backend retention
   const MAX_RECONNECT_ATTEMPTS = 5;
-  const HISTORY_KEY = 'eci-history';
 
   // Pre-calculated window constants
   const WINDOWS = {
@@ -243,16 +241,7 @@
     } catch (e) {
       console.error('Failed to load history:', e);
       reconnectAttempts++;
-      
-      try {
-        const raw = localStorage.getItem(HISTORY_KEY);
-        const stored = raw ? JSON.parse(raw) : [];
-        const cutoff = Date.now() - RETENTION_MS; // Fixed: use 26h retention
-        const filtered = stored.filter((t: Tick) => t.ts >= cutoff);
-        history.set(filtered);
-      } catch { 
-        history.set([]); 
-      }
+      history.set([]); // Empty fallback instead of localStorage
     }
   }
 
@@ -294,15 +283,6 @@
       }
       
       reconnectAttempts++;
-      
-      try {
-        history.update(h => { 
-          const cutoff = Date.now() - RETENTION_MS; // Fixed: use 26h retention
-          const filtered = [...h, { ts, count }].filter(t => t.ts >= cutoff);
-          localStorage.setItem(HISTORY_KEY, JSON.stringify(filtered)); 
-          return filtered; 
-        });
-      } catch {}
       
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) { 
         await loadHistory(); 
