@@ -56,20 +56,29 @@ async function ensureTable() {
       )
     `);
     
+    // Enhanced indexing for better performance - using DO blocks for safer index creation
     await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_signatures_timestamp 
-      ON signatures(timestamp)
+      DO $ 
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_signatures_timestamp') THEN
+          CREATE INDEX idx_signatures_timestamp ON signatures(timestamp);
+        END IF;
+      END $;
     `);
     
-    // Composite index for timestamp range queries (replaces partial index)
     await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_signatures_timestamp_desc 
-      ON signatures(timestamp DESC)
+      DO $ 
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_signatures_timestamp_desc') THEN
+          CREATE INDEX idx_signatures_timestamp_desc ON signatures(timestamp DESC);
+        END IF;
+      END $;
     `);
     
     tableEnsured = true;
   } catch (error) {
     console.error('Schema setup error:', error);
+    // Don't throw error to prevent application failure
   }
 }
 
