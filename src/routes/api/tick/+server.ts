@@ -4,14 +4,13 @@ import type { RequestHandler } from '@sveltejs/kit';
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 10, // Connection pool size
+  max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000
 });
 
-const RETENTION_MS = 26 * 60 * 60 * 1000; // 26 hours
+const RETENTION_MS = 26 * 60 * 60 * 1000;
 
-// Rate limiting with WeakMap for better garbage collection
 const requestCounts = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT_WINDOW = 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 120;
@@ -52,7 +51,6 @@ function isRateLimited(ip: string): boolean {
   const now = Date.now();
   const record = requestCounts.get(ip);
   
-  // Cleanup old entries more efficiently
   if (requestCounts.size > 1000) {
     const cutoff = now - RATE_LIMIT_WINDOW;
     for (const [key, value] of requestCounts.entries()) {
@@ -89,18 +87,16 @@ export const POST: RequestHandler = async (event) => {
 
     const { ts, count } = await event.request.json();
     
-    // More strict validation
     if (
       typeof ts !== 'number' || typeof count !== 'number' ||
       !Number.isInteger(ts) || !Number.isInteger(count) ||
       ts <= 0 || count < 0 ||
-      ts > Date.now() + 60_000 || ts < Date.now() - 86400_000 || // Max 1 day old
-      count > 10_000_000 // Reasonable max signature count
+      ts > Date.now() + 60_000 || ts < Date.now() - 86400_000 ||
+      count > 10_000_000 //
     ) {
       return new Response('Invalid data format', { status: 400 });
     }
 
-    // Enhanced deduplication
     if (lastWrittenData?.ts === ts && lastWrittenData.count === count) {
       return new Response(null, { status: 204 });
     }
@@ -109,7 +105,6 @@ export const POST: RequestHandler = async (event) => {
       return new Response(null, { status: 204 });
     }
 
-    // More efficient query with better transaction handling
     const result = await pool.query(`
       WITH cleanup AS (
         DELETE FROM signatures 
@@ -130,7 +125,6 @@ export const POST: RequestHandler = async (event) => {
 
     lastWrittenData = { ts, count };
     
-    // Only log if something significant happened
     if (result.rows[0]?.cleaned > 0) {
       console.log(`Cleaned ${result.rows[0].cleaned} old records`);
     }

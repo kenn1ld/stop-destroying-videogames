@@ -4,7 +4,7 @@ import type { RequestHandler } from '@sveltejs/kit';
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 10, // Connection pool size
+  max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000
 });
@@ -49,7 +49,6 @@ export const GET: RequestHandler = async (event) => {
     const todayStart = getLocalStartOfDay(now);
     const clientETag = event.request.headers.get('if-none-match');
 
-    // Optimized query with better window functions
     const result = await pool.query(`
       SELECT 
         timestamp as ts, 
@@ -63,9 +62,8 @@ export const GET: RequestHandler = async (event) => {
       ORDER BY timestamp ASC
     `, [now - RETENTION_MS]);
 
-    // More efficient data processing
     const ticks = result.rows.map(row => ({ 
-      ts: Number(row.ts), // More reliable than parseInt
+      ts: Number(row.ts),
       count: row.count 
     }));
     
@@ -81,7 +79,6 @@ export const GET: RequestHandler = async (event) => {
       serverTime: now
     };
 
-    // More robust ETag generation
     const etag = `"${metadata.totalTicks}-${metadata.newestTick || 0}-${Math.floor(metadata.serverTime / 60000)}"`;
     
     if (clientETag === etag) {
@@ -96,7 +93,7 @@ export const GET: RequestHandler = async (event) => {
 
     const payload = { 
       ticks,
-      dailyStats: [], // Keep for compatibility
+      dailyStats: [],
       metadata: {
         todayStart,
         totalTicks: metadata.totalTicks,

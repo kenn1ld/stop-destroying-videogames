@@ -10,10 +10,9 @@
 
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
   const MS_PER_HOUR = 60 * 60 * 1000;
-  const TZ_OFFSET_MS = 2 * 60 * 60 * 1000; // UTC+2
+  const TZ_OFFSET_MS = 2 * 60 * 60 * 1000;
   const MAX_RECONNECT_ATTEMPTS = 5;
 
-  // Pre-calculated window constants
   const WINDOWS = {
     perSec: 30 * 1000,
     perMin: 5 * 60 * 1000,
@@ -40,7 +39,6 @@
     return utcMid - TZ_OFFSET_MS;
   }
 
-  // Helper function to calculate daily quota (used in multiple places)
   function calculateDailyQuota(sigsLeft: number, daysLeft: number): number {
     return daysLeft > 0 ? Math.ceil(sigsLeft / daysLeft) : sigsLeft;
   }
@@ -51,11 +49,9 @@
   const lastUpdate = writable<number>(0);
   const history = writable<Tick[]>([]);
 
-  // Optimized rate calculation with memoized filtering
   const rate = derived(history, $h => {
     const now = Date.now();
     
-    // Pre-filter and sort once
     const sortedHistory = $h.sort((a, b) => a.ts - b.ts);
     
     function calc(windowMs: number, unit: number) {
@@ -70,7 +66,6 @@
         if (dt > 0) return (dc / dt) * unit;
       }
       
-      // Fallback to last two points if window insufficient
       if (sortedHistory.length >= 2) {
         const [a, b] = sortedHistory.slice(-2);
         const dt = (b.ts - a.ts) / 1000;
@@ -81,7 +76,6 @@
       return 0;
     }
 
-    // Calculate data points once for each window
     const dataPoints = {
       perSec: sortedHistory.filter(t => now - t.ts <= WINDOWS.perSec).length,
       perMin: sortedHistory.filter(t => now - t.ts <= WINDOWS.perMin).length,
@@ -98,7 +92,6 @@
     };
   });
 
-  // Optimized today's data calculation
   const todayData = derived(history, $h => {
     const start = getLocalStartOfDay();
     const todayTicks = $h.filter(t => t.ts >= start).sort((a, b) => a.ts - b.ts);
@@ -132,7 +125,6 @@
     };
   });
 
-  // Optimized quota check
   const metToday = derived(
     [todayData, progression, initiative],
     ([$today, $prog, $init]) => {
@@ -148,7 +140,6 @@
     }
   );
 
-  // Optimized projections with shared calculations
   const projections = derived([rate, progression, initiative], 
     ([$rate, $prog, $init]) => {
       const sigsLeft = $prog.goal - $prog.signatureCount;
@@ -181,7 +172,6 @@
     }
   );
 
-  // Shared calculation for daily quota display
   const dailyQuotaNeeded = derived([progression, initiative], ([$prog, $init]) => {
     if (!$init.registrationDate) return 0;
     
@@ -241,12 +231,11 @@
     } catch (e) {
       console.error('Failed to load history:', e);
       reconnectAttempts++;
-      history.set([]); // Empty fallback instead of localStorage
+      history.set([]);
     }
   }
 
   async function saveTickToServer(ts: number, count: number, retry = 0) {
-    // Early returns for duplicate data
     if (lastSent?.ts === ts && lastSent.count === count) return;
     
     const $h = get(history);
@@ -397,11 +386,6 @@
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
   <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-4 sm:space-y-6">
-    
-    <!-- Message about today's data -->
-    <div class="bg-gray-50 dark:bg-gray-700 rounded-lg p-3 text-sm text-gray-700 dark:text-gray-300">
-      Today's signature count is wrong due to a system update. Will fix itself at midnight.
-    </div>
 
     <div class="flex items-start justify-between gap-4">
       <h1 class="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 leading-tight">Stop Destroying Videogames</h1>
