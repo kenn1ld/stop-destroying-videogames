@@ -1,19 +1,12 @@
-<!-- ===== Optimized Svelte Component with Circular Buffers ===== -->
+<!-- ===== src/routes/+page.svelte (or your main Svelte component) ===== -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { writable, derived, get } from 'svelte/store';
   import { browser } from '$app/environment';
 
   interface Progression { signatureCount: number; goal: number; }
   interface InitiativeInfo { registrationDate: string; closingDate: string; }
   interface Tick { ts: number; count: number; }
-  interface RateData {
-    perSec: number;
-    perMin: number;
-    perHour: number;
-    perDay: number;
-    dataPoints: Record<string, number>;
-  }
 
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
   const MS_PER_HOUR = 60 * 60 * 1000;
@@ -35,205 +28,6 @@
     perDay: { good: 2_400, ok: 1_200 }
   } as const;
 
-  // ===== Circular Buffer Implementation =====
-  class CircularBuffer<T> {
-    private buffer: T[];
-    private head = 0;
-    private size = 0;
-    
-    constructor(private capacity: number) {
-      this.buffer = new Array(capacity);
-    }
-    
-    push(item: T): void {
-      this.buffer[this.head] = item;
-      this.head = (this.head + 1) % this.capacity;
-      if (this.size < this.capacity) this.size++;
-    }
-    
-    toArray(): T[] {
-      if (this.size === 0) return [];
-      if (this.size < this.capacity) {
-        return this.buffer.slice(0, this.size);
-      }
-      return [
-        ...this.buffer.slice(this.head),
-        ...this.buffer.slice(0, this.head)
-      ];
-    }
-    
-    filter(predicate: (item: T) => boolean): T[] {
-      return this.toArray().filter(predicate);
-    }
-    
-    get length(): number { return this.size; }
-    
-    clear(): void {
-      this.head = 0;
-      this.size = 0;
-    }
-    
-    getMemoryUsage(): number {
-      return this.size;
-    }
-  }
-
-  // ===== Optimized Tick Manager =====
-  class TickManager {
-    // Use circular buffers to limit memory usage - increased sizes for full day coverage
-    private recentTicks = new CircularBuffer<Tick>(86400); // Full day at 1/sec for today's data
-    private minuteTicks = new CircularBuffer<Tick>(1440); // Last day at 1/min
-    private hourTicks = new CircularBuffer<Tick>(720); // Last month at 1/hour
-    
-    private lastMinuteAgg = 0;
-    private lastHourAgg = 0;
-    
-    // Cache for expensive calculations
-    private rateCache: { rates: RateData; timestamp: number } | null = null;
-    private todayCache: { data: any; timestamp: number; startOfDay: number } | null = null;
-    private readonly CACHE_TTL = 5000; // 5 second cache
-    
-    addTick(tick: Tick): void {
-      this.recentTicks.push(tick);
-      
-      // Aggregate to minute-level data
-      const currentMinute = Math.floor(tick.ts / 60000);
-      if (currentMinute > this.lastMinuteAgg) {
-        this.minuteTicks.push(tick);
-        this.lastMinuteAgg = currentMinute;
-      }
-      
-      // Aggregate to hour-level data  
-      const currentHour = Math.floor(tick.ts / 3600000);
-      if (currentHour > this.lastHourAgg) {
-        this.hourTicks.push(tick);
-        this.lastHourAgg = currentHour;
-      }
-      
-      // Invalidate caches
-      this.rateCache = null;
-      this.todayCache = null;
-    }
-    
-    getRates(): RateData {
-      const now = Date.now();
-      
-      // Return cached rates if still valid
-      if (this.rateCache && (now - this.rateCache.timestamp) < this.CACHE_TTL) {
-        return this.rateCache.rates;
-      }
-      
-      const rates = this.calculateRates(now);
-      this.rateCache = { rates, timestamp: now };
-      return rates;
-    }
-    
-    private calculateRates(now: number): RateData {
-      const recent = this.recentTicks.filter(t => now - t.ts <= 30000); // 30s
-      const minute = this.recentTicks.filter(t => now - t.ts <= 300000); // 5m  
-      const hour = this.minuteTicks.filter(t => now - t.ts <= 3600000); // 1h
-      const day = this.hourTicks.filter(t => now - t.ts <= 86400000); // 1d
-      
-      return {
-        perSec: this.calcRate(recent, 1),
-        perMin: this.calcRate(minute, 60),
-        perHour: this.calcRate(hour, 3600),
-        perDay: this.calcRate(day, 86400),
-        dataPoints: {
-          perSec: recent.length,
-          perMin: minute.length,
-          perHour: hour.length,
-          perDay: day.length
-        }
-      };
-    }
-    
-    private calcRate(ticks: Tick[], multiplier: number): number {
-      if (ticks.length < 2) return 0;
-      
-      const sorted = ticks.sort((a, b) => a.ts - b.ts);
-      const first = sorted[0];
-      const last = sorted[sorted.length - 1];
-      
-      const dt = (last.ts - first.ts) / 1000;
-      const dc = last.count - first.count;
-      
-      return dt > 0 ? Math.max(0, (dc / dt) * multiplier) : 0;
-    }
-    
-    getTodayData(startOfDay: number): any {
-      const now = Date.now();
-      
-      // Return cached data if valid
-      if (this.todayCache && 
-          this.todayCache.startOfDay === startOfDay &&
-          (now - this.todayCache.timestamp) < this.CACHE_TTL) {
-        return this.todayCache.data;
-      }
-      
-      const todayTicks = this.recentTicks.filter(t => t.ts >= startOfDay);
-      
-      if (todayTicks.length === 0) {
-        const msUntilReset = Math.max(0, startOfDay + MS_PER_DAY - now);
-        const hrs = Math.floor(msUntilReset / 3_600_000);
-        const mins = Math.floor((msUntilReset % 3_600_000) / 60_000);
-        
-        const data = {
-          collected: 0,
-          utcStartOfDay: startOfDay,
-          timeUntilResetText: `${hrs}h ${mins}m`,
-          baselineKnown: false,
-          dataPointsToday: 0
-        };
-        
-        this.todayCache = { data, timestamp: now, startOfDay };
-        return data;
-      }
-      
-      const sorted = todayTicks.sort((a, b) => a.ts - b.ts);
-      const baseline = sorted[0].count;
-      const current = sorted[sorted.length - 1].count;
-      const collected = Math.max(0, current - baseline);
-      
-      const msUntilReset = Math.max(0, startOfDay + MS_PER_DAY - now);
-      const hrs = Math.floor(msUntilReset / 3_600_000);
-      const mins = Math.floor((msUntilReset % 3_600_000) / 60_000);
-      
-      const data = {
-        collected,
-        utcStartOfDay: startOfDay,
-        timeUntilResetText: `${hrs}h ${mins}m`,
-        baselineKnown: true,
-        dataPointsToday: todayTicks.length
-      };
-      
-      this.todayCache = { data, timestamp: now, startOfDay };
-      return data;
-    }
-    
-    getMemoryUsage(): { recent: number; minute: number; hour: number; total: number } {
-      const recent = this.recentTicks.length;
-      const minute = this.minuteTicks.length;
-      const hour = this.hourTicks.length;
-      return { recent, minute, hour, total: recent + minute + hour };
-    }
-    
-    clear(): void {
-      this.recentTicks.clear();
-      this.minuteTicks.clear(); 
-      this.hourTicks.clear();
-      this.rateCache = null;
-      this.todayCache = null;
-    }
-    
-    // Get recent tick count for status
-    getRecentTickCount(): number {
-      const now = Date.now();
-      return this.recentTicks.filter(t => now - t.ts <= 10000).length; // Last 10 seconds
-    }
-  }
-
-  // ===== Utility Functions =====
   function parseEUDate(input: string): Date {
     const [d, m, y] = input.split('/').map(Number);
     return new Date(y, m - 1, d);
@@ -246,27 +40,96 @@
     return utcMid - TZ_OFFSET_MS;
   }
 
+  // Helper function to calculate daily quota (used in multiple places)
   function calculateDailyQuota(sigsLeft: number, daysLeft: number): number {
     return daysLeft > 0 ? Math.ceil(sigsLeft / daysLeft) : sigsLeft;
   }
 
-  // ===== Stores =====
   const progression = writable<Progression>({ signatureCount: 0, goal: 1 });
   const initiative = writable<InitiativeInfo>({ registrationDate: '', closingDate: '' });
   const error = writable<string | null>(null);
   const lastUpdate = writable<number>(0);
-  
-  // Initialize tick manager
-  const tickManager = new TickManager();
-  const rateStore = writable<RateData>({
-    perSec: 0, perMin: 0, perHour: 0, perDay: 0,
-    dataPoints: { perSec: 0, perMin: 0, perHour: 0, perDay: 0 }
+  const history = writable<Tick[]>([]);
+
+  // Optimized rate calculation with memoized filtering
+  const rate = derived(history, $h => {
+    const now = Date.now();
+    
+    // Pre-filter and sort once
+    const sortedHistory = $h.sort((a, b) => a.ts - b.ts);
+    
+    function calc(windowMs: number, unit: number) {
+      const cutoff = now - windowMs;
+      const windowTicks = sortedHistory.filter(t => t.ts > cutoff);
+      
+      if (windowTicks.length >= 2) {
+        const first = windowTicks[0];
+        const last = windowTicks[windowTicks.length - 1];
+        const dt = (last.ts - first.ts) / 1000;
+        const dc = last.count - first.count;
+        if (dt > 0) return (dc / dt) * unit;
+      }
+      
+      // Fallback to last two points if window insufficient
+      if (sortedHistory.length >= 2) {
+        const [a, b] = sortedHistory.slice(-2);
+        const dt = (b.ts - a.ts) / 1000;
+        const dc = b.count - a.count;
+        if (dt > 0) return (dc / dt) * unit;
+      }
+      
+      return 0;
+    }
+
+    // Calculate data points once for each window
+    const dataPoints = {
+      perSec: sortedHistory.filter(t => now - t.ts <= WINDOWS.perSec).length,
+      perMin: sortedHistory.filter(t => now - t.ts <= WINDOWS.perMin).length,
+      perHour: sortedHistory.filter(t => now - t.ts <= WINDOWS.perHour).length,
+      perDay: sortedHistory.filter(t => now - t.ts <= WINDOWS.perDay).length
+    };
+
+    return {
+      perSec: calc(WINDOWS.perSec, 1),
+      perMin: calc(WINDOWS.perMin, 60),
+      perHour: calc(WINDOWS.perHour, 3600),
+      perDay: calc(WINDOWS.perDay, 86400),
+      dataPoints
+    };
   });
 
   // Optimized today's data calculation
-  const todayData = derived([rateStore], ([_]) => {
+  const todayData = derived(history, $h => {
     const start = getLocalStartOfDay();
-    return tickManager.getTodayData(start);
+    const todayTicks = $h.filter(t => t.ts >= start).sort((a, b) => a.ts - b.ts);
+
+    const baselineKnown = todayTicks.length > 0;
+    if (!baselineKnown) {
+      const msUntilReset = Math.max(0, start + MS_PER_DAY - Date.now());
+      return {
+        collected: 0,
+        utcStartOfDay: start,
+        timeUntilResetText: `${Math.floor(msUntilReset / 3_600_000)}h ${Math.floor((msUntilReset % 3_600_000) / 60_000)}m`,
+        baselineKnown: false,
+        dataPointsToday: 0
+      };
+    }
+
+    const baseline = todayTicks[0].count;
+    const last = todayTicks[todayTicks.length - 1].count;
+    const collected = last - baseline;
+
+    const msUntilReset = Math.max(0, start + MS_PER_DAY - Date.now());
+    const hrs = Math.floor(msUntilReset / 3_600_000);
+    const mins = Math.floor((msUntilReset % 3_600_000) / 60_000);
+
+    return {
+      collected,
+      utcStartOfDay: start,
+      timeUntilResetText: `${hrs}h ${mins}m`,
+      baselineKnown: true,
+      dataPointsToday: todayTicks.length
+    };
   });
 
   // Optimized quota check
@@ -286,7 +149,7 @@
   );
 
   // Optimized projections with shared calculations
-  const projections = derived([rateStore, progression, initiative], 
+  const projections = derived([rate, progression, initiative], 
     ([$rate, $prog, $init]) => {
       const sigsLeft = $prog.goal - $prog.signatureCount;
       let dailyQuota = 0;
@@ -330,17 +193,10 @@
     return calculateDailyQuota(sigsLeft, daysLeft);
   });
 
-  // ===== Network Management =====
   let handle: ReturnType<typeof setInterval> | null = null;
   let reconnectAttempts = 0;
   let lastETag: string | null = null;
   let lastSent: Tick | null = null;
-  let memoryMonitorHandle: ReturnType<typeof setInterval> | null = null;
-
-  // Request deduplication
-  let pendingRequest = false;
-  let lastRequestTime = 0;
-  const MIN_REQUEST_INTERVAL = 500; // Minimum 500ms between requests
 
   onMount(() => {
     if (!browser) return;
@@ -348,44 +204,20 @@
     (async () => { 
       await loadHistory(); 
       await tick(); 
-      handle = setInterval(tick, 1000);
-      
-      // Memory monitoring
-      memoryMonitorHandle = setInterval(() => {
-        const usage = tickManager.getMemoryUsage();
-        if (usage.total > 20000) { // Increased threshold since we're storing more data
-          console.log(`Tick Manager Memory: ${usage.total} total (${usage.recent} recent, ${usage.minute} minute, ${usage.hour} hour)`);
-        }
-      }, 60000); // Every minute
+      handle = setInterval(tick, 1000); 
     })();
     
     return () => {
       if (handle) clearInterval(handle);
-      if (memoryMonitorHandle) clearInterval(memoryMonitorHandle);
     };
   });
 
-  onDestroy(() => {
-    if (handle) clearInterval(handle);
-    if (memoryMonitorHandle) clearInterval(memoryMonitorHandle);
-  });
-
   async function loadHistory() {
-    const now = Date.now();
-    if (pendingRequest || now - lastRequestTime < MIN_REQUEST_INTERVAL) {
-      return;
-    }
-    
-    pendingRequest = true;
-    lastRequestTime = now;
-    
     try {
       const headers: Record<string, string> = {};
       if (lastETag) headers['If-None-Match'] = lastETag;
       
-      // Load more history to ensure we get full day's data
-      const res = await fetch('/api/tick-history?limit=90000', { headers }); // Get ~25 hours of data
-      
+      const res = await fetch('/api/tick-history', { headers });
       if (res.status === 304) { 
         reconnectAttempts = 0; 
         return; 
@@ -393,52 +225,32 @@
       
       if (res.ok) {
         const data = await res.json();
-        
-        // Clear and repopulate tick manager
-        tickManager.clear();
-        
         if (Array.isArray(data.ticks)) {
-          // Add ticks in chronological order
-          data.ticks
-            .sort((a: Tick, b: Tick) => a.ts - b.ts)
-            .forEach((tick: Tick) => tickManager.addTick(tick));
-          
-          // Update rate store
-          rateStore.set(tickManager.getRates());
-          
-          console.log(`Loaded ${data.ticks.length} historical ticks. Memory usage:`, tickManager.getMemoryUsage());
+          history.set(data.ticks);
+          if (data.metadata) {
+            console.log('Tick history metadata:', data.metadata);
+          }
+        } else {
+          history.set([]);
         }
-        
         lastETag = res.headers.get('ETag');
         reconnectAttempts = 0;
-        
       } else {
         throw new Error(`HTTP ${res.status}`);
       }
     } catch (e) {
       console.error('Failed to load history:', e);
       reconnectAttempts++;
-      tickManager.clear();
-      rateStore.set({
-        perSec: 0, perMin: 0, perHour: 0, perDay: 0,
-        dataPoints: { perSec: 0, perMin: 0, perHour: 0, perDay: 0 }
-      });
-    } finally {
-      pendingRequest = false;
+      history.set([]); // Empty fallback instead of localStorage
     }
   }
 
   async function saveTickToServer(ts: number, count: number, retry = 0) {
-    // Enhanced deduplication
+    // Early returns for duplicate data
     if (lastSent?.ts === ts && lastSent.count === count) return;
     
-    // Check recent tick manager data
-    const recentTicks = tickManager.getRecentTickCount();
-    if (recentTicks > 0) {
-      // Don't send if we have very recent data with same count
-      const currentRates = tickManager.getRates();
-      if (currentRates.perSec < 0.1 && retry === 0) return; // Skip if no recent activity
-    }
+    const $h = get(history);
+    if ($h.length && $h[$h.length - 1].count === count) return;
     
     try {
       const res = await fetch('/api/tick', {
@@ -455,14 +267,10 @@
       
       if (res.status === 503) {
         await new Promise(r => setTimeout(r, 1000));
-        if (retry < 2) return saveTickToServer(ts, count, retry + 1);
-        return;
+        return saveTickToServer(ts, count, retry + 1);
       }
       
-      if (!res.ok) {
-        console.warn(`Server responded with ${res.status}`);
-        return;
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       
       lastSent = { ts, count };
       reconnectAttempts = 0;
@@ -484,8 +292,6 @@
   }
 
   async function tick() {
-    if (pendingRequest) return; // Skip if already processing
-    
     try {
       const [progRes, infoRes] = await Promise.all([
         fetch('https://eci.ec.europa.eu/045/public/api/report/progression'),
@@ -500,28 +306,18 @@
         registrationDate: info.initiativeInfo.registrationDate,
         closingDate: info.initiativeInfo.closingDate
       });
-      
       error.set(null);
       lastUpdate.set(Date.now());
 
       const nowTs = Date.now();
-      
-      // Add to tick manager
-      tickManager.addTick({ ts: nowTs, count: prog.signatureCount });
-      
-      // Update rate store with cached calculation
-      rateStore.set(tickManager.getRates());
-      
-      // Save to server (with enhanced deduplication)
       await saveTickToServer(nowTs, prog.signatureCount);
-      
+      history.update(h => [...h, { ts: nowTs, count: prog.signatureCount }]);
     } catch (e) {
       error.set((e as Error).message);
       console.error('Tick error:', e);
     }
   }
 
-  // ===== UI Helper Functions =====
   function getConfidenceIndicator(dp: number, type: keyof typeof CONFIDENCE_THRESHOLDS) {
     const threshold = CONFIDENCE_THRESHOLDS[type];
     if (dp >= threshold.good) return '✅';
@@ -577,14 +373,12 @@
 
   function getConnectionStatus(ageMs: number, reconnects: number): string {
     if (reconnects > 0) return '🔄 Reconnecting...';
-    if (ageMs > 30_000) return '❌ Connection lost';
-    if (ageMs > 10_000) return '⚠️ Connection issue';
-    return '🟢 Live';
+    return ageMs > 10_000 ? '⚠️ Connection issue' : '🟢 Live';
   }
 
   function shareApp() {
     const $prog = get(progression);
-    const $rate = get(rateStore);
+    const $rate = get(rate);
     const shareText = `🎮 Stop Destroying Videogames petition: ${$prog.signatureCount.toLocaleString()} signatures! Gaining ${Math.round($rate.perHour)}/hour. Help reach ${$prog.goal.toLocaleString()}!`;
     
     if (navigator.share) {
@@ -599,10 +393,6 @@
         .catch(() => alert(`Share: ${shareText} ${window.location.href}`));
     }
   }
-
-  // Performance monitoring
-  $: memoryUsage = tickManager.getMemoryUsage();
-  $: recentActivity = tickManager.getRecentTickCount();
 </script>
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
@@ -632,29 +422,29 @@
         <div class="flex items-center justify-between">
           <span>Rate/sec:</span>
           <span class="flex items-center gap-1">
-            <strong>{$rateStore.perSec.toFixed(2)}</strong>
-            <span class="text-xs">{getConfidenceIndicator($rateStore.dataPoints.perSec, 'perSec')}</span>
+            <strong>{$rate.perSec.toFixed(2)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perSec, 'perSec')}</span>
           </span>
         </div>
         <div class="flex items-center justify-between">
           <span>Rate/min:</span>
           <span class="flex items-center gap-1">
-            <strong>{$rateStore.perMin.toFixed(0)}</strong>
-            <span class="text-xs">{getConfidenceIndicator($rateStore.dataPoints.perMin, 'perMin')}</span>
+            <strong>{$rate.perMin.toFixed(0)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perMin, 'perMin')}</span>
           </span>
         </div>
         <div class="flex items-center justify-between">
           <span>Rate/hr:</span>
           <span class="flex items-center gap-1">
-            <strong>{$rateStore.perHour.toFixed(0)}</strong>
-            <span class="text-xs">{getConfidenceIndicator($rateStore.dataPoints.perHour, 'perHour')}</span>
+            <strong>{$rate.perHour.toFixed(0)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perHour, 'perHour')}</span>
           </span>
         </div>
         <div class="flex items-center justify-between">
           <span>Rate/day:</span>
           <span class="flex items-center gap-1">
-            <strong>{$rateStore.perDay.toFixed(0)}</strong>
-            <span class="text-xs">{getConfidenceIndicator($rateStore.dataPoints.perDay, 'perDay')}</span>
+            <strong>{$rate.perDay.toFixed(0)}</strong>
+            <span class="text-xs">{getConfidenceIndicator($rate.dataPoints.perDay, 'perDay')}</span>
           </span>
         </div>
       </div>
@@ -703,9 +493,7 @@
       </div>
 
       <div class="text-xs text-gray-500 dark:text-gray-400 text-center">
-        Data points: {$rateStore.dataPoints.perSec}s / {$rateStore.dataPoints.perMin}m / {$rateStore.dataPoints.perHour}h / {$rateStore.dataPoints.perDay}d
-        <br>
-        Memory: {memoryUsage.total} ticks ({memoryUsage.recent}+{memoryUsage.minute}+{memoryUsage.hour}) | Activity: {recentActivity}
+        Data points: {$rate.dataPoints.perSec}s / {$rate.dataPoints.perMin}m / {$rate.dataPoints.perHour}h / {$rate.dataPoints.perDay}d
       </div>
 
       <div class="mt-4 grid grid-cols-2 gap-4 text-sm text-gray-600 dark:text-gray-400">
@@ -763,19 +551,6 @@
             Sign the petition →
           </a>
         </div>
-        
-        <!-- Performance indicator for development -->
-        {#if memoryUsage.total > 15000}
-          <div class="mt-2 text-xs text-orange-500">
-            High memory usage detected: {memoryUsage.total} ticks
-          </div>
-        {/if}
-        
-        {#if recentActivity === 0 && Date.now() - $lastUpdate > 15000}
-          <div class="mt-1 text-xs text-yellow-500">
-            No recent server activity detected
-          </div>
-        {/if}
       </div>
 
     {/if}
@@ -783,28 +558,6 @@
 </main>
 
 <style>
-  :global(.svelte) { 
-    animation: fadeIn 0.8s ease-out both; 
-  }
-  
-  @keyframes fadeIn { 
-    from { 
-      opacity: 0; 
-      transform: translateY(10px);
-    } 
-    to { 
-      opacity: 1; 
-      transform: translateY(0);
-    } 
-  }
-  
-  /* Optimize repaints for frequently updating elements */
-  :global(.font-mono) {
-    will-change: contents;
-  }
-  
-  /* Smooth transitions for progress bars */
-  :global(.transition-\[width\]) {
-    will-change: width;
-  }
+  :global(.svelte) { animation: fadeIn 0.8s ease-out both; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px);} to { opacity: 1; transform: translateY(0);} }
 </style>
