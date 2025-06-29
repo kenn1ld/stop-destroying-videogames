@@ -203,13 +203,6 @@
   onMount(() => {
     if (!browser) return;
     
-    const onVis = () => {
-      if (!document.hidden && !handle) handle = setInterval(tick, 1000);
-      if (document.hidden && handle) { clearInterval(handle); handle = null; }
-    };
-    
-    document.addEventListener('visibilitychange', onVis);
-    
     (async () => { 
       await loadHistory(); 
       await tick(); 
@@ -218,7 +211,6 @@
     
     return () => {
       if (handle) clearInterval(handle);
-      document.removeEventListener('visibilitychange', onVis);
     };
   });
 
