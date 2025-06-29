@@ -8,7 +8,7 @@ const DAILY_STATS_DB = path.resolve(STORAGE_DIR, 'daily-stats.json');
 const BACKUP_DB = path.resolve(STORAGE_DIR, 'tick-history.backup.json');
 
 const TZ_OFFSET_MS = 2 * 60 * 60 * 1000;
-const RETENTION_MS = 48 * 60 * 60 * 1000; // Only keep 48 hours
+const RETENTION_MS = 26 * 60 * 60 * 1000; // Only keep 48 hours
 
 interface DailyStat {
   date: string;
