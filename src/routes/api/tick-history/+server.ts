@@ -401,7 +401,6 @@ export const GET: RequestHandler = async (event) => {
   const includeRates = url.searchParams.get('rates') !== 'false'; 
   const includeTodayStats = url.searchParams.get('today') !== 'false';
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '0'), 50000); // Cap at 50k
-  const compress = url.searchParams.get('compress') === 'true';
 
   try {
     // Check cache first
@@ -486,11 +485,6 @@ export const GET: RequestHandler = async (event) => {
       'X-Cache': 'MISS',
       'X-Response-Size': responseSize.toString()
     };
-
-    // Add compression header if requested
-    if (compress && responseSize > 1000) {
-      headers['Content-Encoding'] = 'gzip';
-    }
     
     return new Response(JSON.stringify(responseData), { headers });
     
