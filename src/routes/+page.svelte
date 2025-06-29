@@ -11,7 +11,7 @@
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
   const MS_PER_HOUR = 60 * 60 * 1000;
   const TZ_OFFSET_MS = 2 * 60 * 60 * 1000; // UTC+2
-  const SEVEN_DAYS_MS = 7 * MS_PER_DAY;
+  const RETENTION_MS = 26 * 60 * 60 * 1000; // Match backend retention
   const MAX_RECONNECT_ATTEMPTS = 5;
   const HISTORY_KEY = 'eci-history';
 
@@ -247,7 +247,7 @@
       try {
         const raw = localStorage.getItem(HISTORY_KEY);
         const stored = raw ? JSON.parse(raw) : [];
-        const cutoff = Date.now() - SEVEN_DAYS_MS;
+        const cutoff = Date.now() - RETENTION_MS; // Fixed: use 26h retention
         const filtered = stored.filter((t: Tick) => t.ts >= cutoff);
         history.set(filtered);
       } catch { 
@@ -297,7 +297,7 @@
       
       try {
         history.update(h => { 
-          const cutoff = Date.now() - SEVEN_DAYS_MS;
+          const cutoff = Date.now() - RETENTION_MS; // Fixed: use 26h retention
           const filtered = [...h, { ts, count }].filter(t => t.ts >= cutoff);
           localStorage.setItem(HISTORY_KEY, JSON.stringify(filtered)); 
           return filtered; 
@@ -417,6 +417,12 @@
 
 <main class="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-900 flex items-center justify-center p-4 sm:p-6">
   <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-4 sm:space-y-6">
+    
+    <!-- Message about today's data -->
+    <div class="bg-gray-50 dark:bg-gray-700 rounded-lg p-3 text-sm text-gray-700 dark:text-gray-300">
+      Today's signature count is wrong due to a system update. Will fix itself at midnight.
+    </div>
+
     <div class="flex items-start justify-between gap-4">
       <h1 class="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-gray-100 leading-tight">Stop Destroying Videogames</h1>
       <div class="flex items-center gap-2 shrink-0">
