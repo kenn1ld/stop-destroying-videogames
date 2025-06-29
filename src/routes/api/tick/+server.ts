@@ -11,6 +11,7 @@ const LOCK_FILE = path.resolve(STORAGE_DIR, '.write.lock');
 const requestCounts = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT_WINDOW = 60 * 1000;
 const MAX_REQUESTS_PER_WINDOW = 120;
+const RETENTION_MS = 26 * 60 * 60 * 1000; // 26 hours
 let lastWrittenData: { ts: number; count: number } | null = null;
 
 interface DailyStat {
@@ -51,7 +52,6 @@ function isRateLimited(ip: string): boolean {
   const now = Date.now();
   const record = requestCounts.get(ip);
   
-  // Clean up old entries periodically
   if (requestCounts.size > 1000) {
     for (const [key, value] of requestCounts.entries()) {
       if (now > value.resetTime) {
@@ -101,10 +101,10 @@ async function archiveAndCleanup(allTicks: { ts: number; count: number }[]): Pro
   const yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
   const yesterdayLabel = getLocalDateString(yesterdayStart);
 
-  // Check if we have yesterday's data to archive
+  // Archive yesterday's data
   const yesterdayData = allTicks.filter(t => t.ts >= yesterdayStart && t.ts < todayStart);
   
-  if (yesterdayData.length >= 50) {
+  if (yesterdayData.length >= 10) { // Reduced threshold since we have less data
     const startCount = yesterdayData[0].count;
     const endCount = yesterdayData[yesterdayData.length - 1].count;
     const signaturesCollected = endCount - startCount;
@@ -133,9 +133,15 @@ async function archiveAndCleanup(allTicks: { ts: number; count: number }[]): Pro
     console.log(`✅ Archived ${signaturesCollected} signatures from ${yesterdayLabel}`);
   }
 
-  // Keep only last 7 days of tick data (for rate calculations)
-  const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
-  return allTicks.filter(t => t.ts >= sevenDaysAgo);
+  // Aggressive cleanup: only keep last 26 hours
+  const retentionCutoff = now - RETENTION_MS;
+  const recentTicks = allTicks.filter(t => t.ts >= retentionCutoff);
+  
+  if (allTicks.length > recentTicks.length) {
+    console.log(`🧹 Cleaned up ${allTicks.length - recentTicks.length} old ticks (keeping 26h)`);
+  }
+  
+  return recentTicks;
 }
 
 async function createBackup(data: any[]): Promise<void> {
@@ -153,14 +159,12 @@ async function acquireLock(maxWaitMs: number = 5000): Promise<boolean> {
   
   while (Date.now() - startTime < maxWaitMs) {
     try {
-      // Try to create lock file exclusively
       await fs.writeFile(LOCK_FILE, process.pid.toString(), { flag: 'wx' });
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error;
       }
-      // Lock exists, wait a bit
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
@@ -206,7 +210,6 @@ export const POST: RequestHandler = async (event) => {
       return new Response(null, { status: 204 });
     }
 
-    // Acquire lock for file operations
     const lockAcquired = await acquireLock();
     if (!lockAcquired) {
       return new Response('Server busy, please retry', { 
@@ -216,7 +219,7 @@ export const POST: RequestHandler = async (event) => {
     }
 
     try {
-      // Load full tick history
+      // Load tick history
       let arr: { ts: number; count: number }[] = [];
       try {
         const raw = await fs.readFile(DB, 'utf-8');
@@ -230,7 +233,7 @@ export const POST: RequestHandler = async (event) => {
         }
       }
 
-      // Archive yesterday's data and cleanup old data
+      // Archive and cleanup with 26h retention
       arr = await archiveAndCleanup(arr);
 
       // Add or update current tick
@@ -244,8 +247,8 @@ export const POST: RequestHandler = async (event) => {
       // Sort by timestamp
       arr.sort((a, b) => a.ts - b.ts);
       
-      // Create backup periodically
-      if (arr.length % 1000 === 0) {
+      // Create backup less frequently since data is smaller
+      if (arr.length % 500 === 0) {
         await createBackup(arr);
       }
 
@@ -256,7 +259,6 @@ export const POST: RequestHandler = async (event) => {
         await fs.rename(tmp, DB);
         lastWrittenData = { ts, count };
       } catch (writeError) {
-        // Clean up temp file
         try {
           await fs.unlink(tmp);
         } catch {}
