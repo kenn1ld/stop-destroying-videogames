@@ -80,8 +80,8 @@
 
   // ===== Optimized Tick Manager =====
   class TickManager {
-    // Use circular buffers to limit memory usage
-    private recentTicks = new CircularBuffer<Tick>(3600); // Last hour at 1/sec
+    // Use circular buffers to limit memory usage - increased sizes for full day coverage
+    private recentTicks = new CircularBuffer<Tick>(86400); // Full day at 1/sec for today's data
     private minuteTicks = new CircularBuffer<Tick>(1440); // Last day at 1/min
     private hourTicks = new CircularBuffer<Tick>(720); // Last month at 1/hour
     
@@ -353,7 +353,7 @@
       // Memory monitoring
       memoryMonitorHandle = setInterval(() => {
         const usage = tickManager.getMemoryUsage();
-        if (usage.total > 10000) { // Log if using more than 10k ticks
+        if (usage.total > 20000) { // Increased threshold since we're storing more data
           console.log(`Tick Manager Memory: ${usage.total} total (${usage.recent} recent, ${usage.minute} minute, ${usage.hour} hour)`);
         }
       }, 60000); // Every minute
@@ -383,8 +383,8 @@
       const headers: Record<string, string> = {};
       if (lastETag) headers['If-None-Match'] = lastETag;
       
-      // Limit initial load to prevent memory issues
-      const res = await fetch('/api/tick-history?limit=86400&compress=true', { headers });
+      // Load more history to ensure we get full day's data
+      const res = await fetch('/api/tick-history?limit=90000', { headers }); // Get ~25 hours of data
       
       if (res.status === 304) { 
         reconnectAttempts = 0; 
@@ -765,7 +765,7 @@
         </div>
         
         <!-- Performance indicator for development -->
-        {#if memoryUsage.total > 5000}
+        {#if memoryUsage.total > 15000}
           <div class="mt-2 text-xs text-orange-500">
             High memory usage detected: {memoryUsage.total} ticks
           </div>
