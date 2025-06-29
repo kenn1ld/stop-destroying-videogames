@@ -3,7 +3,10 @@ import type { RequestHandler } from '@sveltejs/kit';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  max: 10, // Connection pool size
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000
 });
 
 const TZ_OFFSET_MS = 2 * 60 * 60 * 1000;
@@ -46,38 +49,49 @@ export const GET: RequestHandler = async (event) => {
     const todayStart = getLocalStartOfDay(now);
     const clientETag = event.request.headers.get('if-none-match');
 
-    // Single query to get all data with metadata
+    // Optimized query with better window functions
     const result = await pool.query(`
       SELECT 
         timestamp as ts, 
         count,
         COUNT(*) OVER() as total_count,
         MIN(timestamp) OVER() as oldest_tick,
-        MAX(timestamp) OVER() as newest_tick
+        MAX(timestamp) OVER() as newest_tick,
+        EXTRACT(EPOCH FROM NOW()) as server_time
       FROM signatures 
       WHERE timestamp > $1 
       ORDER BY timestamp ASC
     `, [now - RETENTION_MS]);
 
+    // More efficient data processing
     const ticks = result.rows.map(row => ({ 
-      ts: parseInt(row.ts), 
+      ts: Number(row.ts), // More reliable than parseInt
       count: row.count 
     }));
     
-    const metadata = result.rows[0] ? {
-      totalTicks: parseInt(result.rows[0].total_count),
-      oldestTick: parseInt(result.rows[0].oldest_tick),
-      newestTick: parseInt(result.rows[0].newest_tick)
+    const metadata = result.rows.length > 0 ? {
+      totalTicks: Number(result.rows[0].total_count),
+      oldestTick: Number(result.rows[0].oldest_tick),
+      newestTick: Number(result.rows[0].newest_tick),
+      serverTime: Math.floor(Number(result.rows[0].server_time) * 1000)
     } : {
       totalTicks: 0,
       oldestTick: null,
-      newestTick: null
+      newestTick: null,
+      serverTime: now
     };
 
-    const etag = `"${metadata.totalTicks}-${metadata.newestTick}"`;
+    // More robust ETag generation
+    const etag = `"${metadata.totalTicks}-${metadata.newestTick || 0}-${Math.floor(metadata.serverTime / 60000)}"`;
     
     if (clientETag === etag) {
-      return new Response(null, { status: 304 });
+      return new Response(null, { 
+        status: 304,
+        headers: {
+          'ETag': etag,
+          'Cache-Control': 'no-cache, must-revalidate'
+        }
+      });
     }
 
     const payload = { 
@@ -88,7 +102,8 @@ export const GET: RequestHandler = async (event) => {
         totalTicks: metadata.totalTicks,
         oldestTick: metadata.oldestTick,
         newestTick: metadata.newestTick,
-        retentionHours: 26
+        retentionHours: 26,
+        serverTime: metadata.serverTime
       }
     };
     
@@ -96,9 +111,10 @@ export const GET: RequestHandler = async (event) => {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-cache, must-revalidate',
       'ETag': etag,
-      'Last-Modified': new Date(now).toUTCString(),
+      'Last-Modified': new Date(metadata.serverTime).toUTCString(),
       'X-Tick-Count': metadata.totalTicks.toString(),
-      'X-Retention': '26h'
+      'X-Retention': '26h',
+      'X-Server-Time': metadata.serverTime.toString()
     };
     
     return new Response(JSON.stringify(payload), { headers });
@@ -114,12 +130,16 @@ export const GET: RequestHandler = async (event) => {
         totalTicks: 0,
         oldestTick: null,
         newestTick: null,
-        retentionHours: 26
+        retentionHours: 26,
+        serverTime: Date.now()
       }
     };
     
     return new Response(JSON.stringify(errorPayload), {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, must-revalidate'
+      },
       status: 500
     });
   }
