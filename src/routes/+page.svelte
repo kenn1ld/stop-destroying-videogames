@@ -188,45 +188,11 @@
   let lastETag: string | null = null;
   let lastSent: Tick | null = null;
 
-  // Optimization variables
-  let lastHistoryRefresh = 0;
-  let newestTickTimestamp = 0; // Track newest tick we have
-  let fullHistoryLoaded = false; // Track if we've loaded full history
-
-  // Helper function to decompress ticks
-  function decompressTicks(compressed: Array<[number, number]>, baseTime: number): Array<{ts: number, count: number}> {
-    return compressed.map(([relativeTs, count]) => ({
-      ts: baseTime + relativeTs,
-      count
-    }));
-  }
-
-  // Helper function to merge incremental data
-  function mergeTickData(existing: Array<{ts: number, count: number}>, incoming: Array<{ts: number, count: number}>): Array<{ts: number, count: number}> {
-    const merged = [...existing];
-    const existingTimes = new Set(existing.map(t => t.ts));
-    
-    // Add only new ticks
-    for (const tick of incoming) {
-      if (!existingTimes.has(tick.ts)) {
-        merged.push(tick);
-      }
-    }
-    
-    // Sort by timestamp and keep only recent data within retention period
-    const now = Date.now();
-    const retentionCutoff = now - (26 * 60 * 60 * 1000); // 26 hours
-    
-    return merged
-      .filter(t => t.ts > retentionCutoff)
-      .sort((a, b) => a.ts - b.ts);
-  }
-
   onMount(() => {
     if (!browser) return;
     
     (async () => { 
-      await loadHistory(false); // Initial full load
+      await loadHistory(); 
       await tick(); 
       handle = setInterval(tick, 1000); 
     })();
@@ -236,32 +202,12 @@
     };
   });
 
-  // Updated loadHistory function
-  async function loadHistory(incremental = false) {
+  async function loadHistory() {
     try {
-      const params = new URLSearchParams();
-      
-      // Request incremental updates after initial load
-      if (incremental && newestTickTimestamp > 0) {
-        params.set('since', newestTickTimestamp.toString());
-      }
-      
-      // Enable compression
-      params.set('compress', 'true');
-      
-      // Limit data points to reduce transfer
-      if (!incremental) {
-        params.set('sample', '300'); // Reduce from 500 to 300 for even smaller size
-      }
-      
       const headers: Record<string, string> = {};
-      if (lastETag && !incremental) {
-        headers['If-None-Match'] = lastETag;
-      }
+      if (lastETag) headers['If-None-Match'] = lastETag;
       
-      const url = `/api/tick-history${params.toString() ? '?' + params.toString() : ''}`;
-      const res = await fetch(url, { headers });
-      
+      const res = await fetch('/api/tick-history', { headers });
       if (res.status === 304) { 
         reconnectAttempts = 0; 
         return; 
@@ -269,42 +215,15 @@
       
       if (res.ok) {
         const data = await res.json();
-        
         if (Array.isArray(data.ticks)) {
-          let newTicks = data.ticks;
-          
-          // Handle compressed data
-          if (data.compressed && data.metadata?.baseTime) {
-            newTicks = decompressTicks(newTicks, data.metadata.baseTime);
-          }
-          
-          if (incremental && fullHistoryLoaded) {
-            // Merge with existing data
-            const currentHistory = get(history);
-            const mergedHistory = mergeTickData(currentHistory, newTicks);
-            history.set(mergedHistory);
-          } else {
-            // Replace all data (initial load or full refresh)
-            history.set(newTicks);
-            fullHistoryLoaded = true;
-          }
-          
-          // Update newest timestamp
-          if (newTicks.length > 0) {
-            newestTickTimestamp = Math.max(...newTicks.map((t: Tick) => t.ts));
-          }
-          
+          history.set(data.ticks);
           if (data.metadata) {
-            console.log(`Tick history: ${newTicks.length} ticks loaded${data.incremental ? ' (incremental)' : ''}${data.metadata.sampled ? ` (sampled from ${data.metadata.originalCount})` : ''}`);
+            console.log('Tick history metadata:', data.metadata);
           }
         } else {
           history.set([]);
-          fullHistoryLoaded = false;
         }
-        
-        if (!incremental) {
-          lastETag = res.headers.get('ETag');
-        }
+        lastETag = res.headers.get('ETag');
         reconnectAttempts = 0;
       } else {
         throw new Error(`HTTP ${res.status}`);
@@ -312,10 +231,7 @@
     } catch (e) {
       console.error('Failed to load history:', e);
       reconnectAttempts++;
-      if (!incremental) {
-        history.set([]);
-        fullHistoryLoaded = false;
-      }
+      history.set([]);
     }
   }
 
@@ -358,40 +274,33 @@
       reconnectAttempts++;
       
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) { 
-        await loadHistory(false); // Full refresh on max reconnect attempts
+        await loadHistory(); 
         reconnectAttempts = 0; 
       }
     }
   }
 
-  // Updated tick function with better refresh strategy
   async function tick() {
     try {
-      const response = await fetch('/api/current');
-      const data = await response.json();
+      const [progRes, infoRes] = await Promise.all([
+        fetch('https://eci.ec.europa.eu/045/public/api/report/progression'),
+        fetch('https://eci.ec.europa.eu/045/public/api/initiative/description')
+      ]);
       
-      if (data.error && !data.progression) {
-        throw new Error(data.error);
-      }
-      
-      progression.set(data.progression);
-      initiative.set(data.initiative);
+      const prog = await progRes.json();
+      const info = await infoRes.json();
+
+      progression.set({ signatureCount: prog.signatureCount, goal: prog.goal });
+      initiative.set({
+        registrationDate: info.initiativeInfo.registrationDate,
+        closingDate: info.initiativeInfo.closingDate
+      });
       error.set(null);
       lastUpdate.set(Date.now());
 
-      const now = Date.now();
-      
-      // Initial load or periodic full refresh (every 5 minutes)
-      if (!fullHistoryLoaded || now - lastHistoryRefresh > 300_000) {
-        await loadHistory(false); // Full load
-        lastHistoryRefresh = now;
-      } 
-      // Incremental updates every 10 seconds
-      else if (now - lastHistoryRefresh > 10_000) {
-        await loadHistory(true); // Incremental load
-        lastHistoryRefresh = now;
-      }
-      
+      const nowTs = Date.now();
+      await saveTickToServer(nowTs, prog.signatureCount);
+      history.update(h => [...h, { ts: nowTs, count: prog.signatureCount }]);
     } catch (e) {
       error.set((e as Error).message);
       console.error('Tick error:', e);
@@ -620,7 +529,7 @@
       </div>
 
       <div class="text-xs text-center text-gray-400 dark:text-gray-500 border-t pt-3">
-        <div>Live tracker • Optimized transfers • UTC+2 timezone • Daily reset</div>
+        <div>Live tracker • Updates every second • UTC+2 timezone • Daily reset</div>
         <div class="mt-1">
           <a href="https://eci.ec.europa.eu/045/public/" target="_blank" class="text-blue-500 hover:text-blue-600 transition-colors">
             Sign the petition →

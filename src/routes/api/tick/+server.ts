@@ -92,12 +92,19 @@ export const POST: RequestHandler = async (event) => {
       !Number.isInteger(ts) || !Number.isInteger(count) ||
       ts <= 0 || count < 0 ||
       ts > Date.now() + 60_000 || ts < Date.now() - 86400_000 ||
-      count > 10_000_000
+      count > 10_000_000 //
     ) {
       return new Response('Invalid data format', { status: 400 });
     }
 
-    // SIMPLIFIED: No more deduplication needed since server controls the data flow
+    if (lastWrittenData?.ts === ts && lastWrittenData.count === count) {
+      return new Response(null, { status: 204 });
+    }
+    
+    if (lastWrittenData && Math.abs(ts - lastWrittenData.ts) < 2000 && lastWrittenData.count === count) {
+      return new Response(null, { status: 204 });
+    }
+
     const result = await pool.query(`
       WITH cleanup AS (
         DELETE FROM signatures 
@@ -120,10 +127,6 @@ export const POST: RequestHandler = async (event) => {
     
     if (result.rows[0]?.cleaned > 0) {
       console.log(`Cleaned ${result.rows[0].cleaned} old records`);
-    }
-    
-    if (result.rows[0]?.upserted > 0) {
-      console.log(`Saved: ${count} signatures at ${new Date(ts).toISOString()}`);
     }
     
     return new Response(null, { status: 204 });
