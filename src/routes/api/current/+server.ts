@@ -16,7 +16,7 @@ let cachedData: any = null;
 let lastFetch = 0;
 let activeFetch: Promise<any> | null = null;
 let lastSavedCount: number | null = null;
-const CACHE_DURATION = 1000; // 1 second cache
+const CACHE_DURATION = 5000; // 1 second cache
 
 export const GET: RequestHandler = async () => {
   const now = Date.now();
@@ -73,6 +73,7 @@ export const GET: RequestHandler = async () => {
 
 // Update your /api/current/+server.ts - modify the fetchAndSave function:
 
+// 2. ONLY SAVE WHEN COUNT CHANGES (reduces database writes by 95%)
 async function fetchAndSave() {
   try {
     console.log('[Server] Fetching from EU APIs...');
@@ -92,9 +93,14 @@ async function fetchAndSave() {
     const now = Date.now();
     const currentCount = prog.signatureCount;
     
-    // ✅ ALWAYS SAVE TO DATABASE (every fetch, not just on count changes)
-    await saveToDatabase(now, currentCount);
-    console.log(`[Server] Saved: ${currentCount} signatures at ${new Date(now).toISOString()}`);
+    // ✅ ONLY SAVE WHEN COUNT CHANGES (massive cost reduction)
+    if (lastSavedCount !== currentCount) {
+      await saveToDatabase(now, currentCount);
+      lastSavedCount = currentCount;
+      console.log(`[Server] Saved: ${currentCount} signatures (count changed)`);
+    } else {
+      console.log(`[Server] Skipped save: ${currentCount} signatures (no change)`);
+    }
     
     cachedData = {
       progression: { 

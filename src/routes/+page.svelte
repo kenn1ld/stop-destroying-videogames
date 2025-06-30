@@ -285,7 +285,6 @@
 let lastHistoryRefresh = 0;
 
 // Update your tick() function:
-// Update your tick() function to refresh history every second:
 async function tick() {
   try {
     const response = await fetch('/api/current');
@@ -300,8 +299,12 @@ async function tick() {
     error.set(null);
     lastUpdate.set(Date.now());
 
-    // ✅ Refresh history EVERY SECOND to get latest server data
-    await loadHistory();
+    // ✅ Refresh history every 10 seconds instead of every second
+    const now = Date.now();
+    if (now - lastHistoryRefresh > 10_000) { // 10 seconds
+      await loadHistory();
+      lastHistoryRefresh = now;
+    }
     
   } catch (e) {
     error.set((e as Error).message);
