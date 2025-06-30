@@ -280,7 +280,11 @@
     }
   }
 
-// Replace your tick() function with this corrected version:
+// Replace your tick() function with this:
+// Add this variable at the top with your other variables:
+let lastHistoryRefresh = 0;
+
+// Update your tick() function:
 async function tick() {
   try {
     const response = await fetch('/api/current');
@@ -294,6 +298,13 @@ async function tick() {
     initiative.set(data.initiative);
     error.set(null);
     lastUpdate.set(Date.now());
+
+    // ✅ Refresh history every 30 seconds to get new server data points
+    const now = Date.now();
+    if (now - lastHistoryRefresh > 1000) { // 30 seconds
+      await loadHistory();
+      lastHistoryRefresh = now;
+    }
     
   } catch (e) {
     error.set((e as Error).message);
