@@ -1,5 +1,9 @@
 import { Pool } from 'pg';
 import type { RequestHandler } from '@sveltejs/kit';
+import { gzip } from 'zlib';
+import { promisify } from 'util';
+
+const gzipAsync = promisify(gzip);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -41,13 +45,53 @@ function getLocalStartOfDay(ts: number = Date.now()): number {
   return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - TZ_OFFSET_MS;
 }
 
+// Compress tick data by removing redundant information
+function compressTicks(ticks: Array<{ts: number, count: number}>): Array<[number, number]> {
+  // Return as tuples [relativeTs, count] to save space
+  if (ticks.length === 0) return [];
+  
+  const baseTime = ticks[0].ts;
+  return ticks.map(tick => [tick.ts - baseTime, tick.count]);
+}
+
+// Sample data to reduce transfer size while maintaining accuracy
+function sampleTicks(ticks: Array<{ts: number, count: number}>, maxPoints: number = 500): Array<{ts: number, count: number}> {
+  if (ticks.length <= maxPoints) return ticks;
+  
+  const interval = Math.floor(ticks.length / maxPoints);
+  const sampled = [];
+  
+  // Always include first and last points
+  sampled.push(ticks[0]);
+  
+  // Sample intermediate points
+  for (let i = interval; i < ticks.length - 1; i += interval) {
+    sampled.push(ticks[i]);
+  }
+  
+  // Always include the last point
+  if (ticks.length > 1) {
+    sampled.push(ticks[ticks.length - 1]);
+  }
+  
+  return sampled;
+}
+
 export const GET: RequestHandler = async (event) => {
   await ensureTable();
 
   try {
+    const url = new URL(event.request.url);
+    const since = parseInt(url.searchParams.get('since') || '0');
+    const compress = url.searchParams.get('compress') === 'true';
+    const sample = parseInt(url.searchParams.get('sample') || '500');
+    
     const now = Date.now();
     const todayStart = getLocalStartOfDay(now);
     const clientETag = event.request.headers.get('if-none-match');
+
+    // If client provides 'since' timestamp, only return newer data
+    const cutoffTime = since > 0 ? Math.max(since, now - RETENTION_MS) : now - RETENTION_MS;
 
     const result = await pool.query(`
       SELECT 
@@ -60,26 +104,34 @@ export const GET: RequestHandler = async (event) => {
       FROM signatures 
       WHERE timestamp > $1 
       ORDER BY timestamp ASC
-    `, [now - RETENTION_MS]);
+    `, [cutoffTime]);
 
-    const ticks = result.rows.map(row => ({ 
+    let ticks = result.rows.map(row => ({ 
       ts: Number(row.ts),
       count: row.count 
     }));
+
+    // Sample data if requested to reduce size
+    if (sample > 0 && ticks.length > sample) {
+      ticks = sampleTicks(ticks, sample);
+    }
     
     const metadata = result.rows.length > 0 ? {
       totalTicks: Number(result.rows[0].total_count),
       oldestTick: Number(result.rows[0].oldest_tick),
       newestTick: Number(result.rows[0].newest_tick),
-      serverTime: Math.floor(Number(result.rows[0].server_time) * 1000)
+      serverTime: Math.floor(Number(result.rows[0].server_time) * 1000),
+      baseTime: ticks.length > 0 ? ticks[0].ts : null // For decompression
     } : {
       totalTicks: 0,
       oldestTick: null,
       newestTick: null,
-      serverTime: now
+      serverTime: now,
+      baseTime: null
     };
 
-    const etag = `"${metadata.totalTicks}-${metadata.newestTick || 0}-${Math.floor(metadata.serverTime / 60000)}"`;
+    // Create ETag based on newest data and parameters
+    const etag = `"${metadata.totalTicks}-${metadata.newestTick || 0}-${Math.floor(metadata.serverTime / 60000)}-${since}-${sample}"`;
     
     if (clientETag === etag) {
       return new Response(null, { 
@@ -92,7 +144,9 @@ export const GET: RequestHandler = async (event) => {
     }
 
     const payload = { 
-      ticks,
+      ticks: compress ? compressTicks(ticks) : ticks,
+      compressed: compress,
+      incremental: since > 0,
       dailyStats: [],
       metadata: {
         todayStart,
@@ -100,11 +154,14 @@ export const GET: RequestHandler = async (event) => {
         oldestTick: metadata.oldestTick,
         newestTick: metadata.newestTick,
         retentionHours: 26,
-        serverTime: metadata.serverTime
+        serverTime: metadata.serverTime,
+        baseTime: metadata.baseTime,
+        sampled: ticks.length !== result.rows.length,
+        originalCount: result.rows.length
       }
     };
     
-    const headers = {
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-cache, must-revalidate',
       'ETag': etag,
@@ -113,14 +170,27 @@ export const GET: RequestHandler = async (event) => {
       'X-Retention': '26h',
       'X-Server-Time': metadata.serverTime.toString()
     };
+
+    let responseBody = JSON.stringify(payload);
+
+    // Enable gzip compression if client supports it
+    const acceptEncoding = event.request.headers.get('accept-encoding') || '';
+    if (acceptEncoding.includes('gzip')) {
+      const compressed = await gzipAsync(responseBody);
+      headers['Content-Encoding'] = 'gzip';
+      headers['Content-Length'] = compressed.length.toString();
+      return new Response(compressed, { headers });
+    }
     
-    return new Response(JSON.stringify(payload), { headers });
+    return new Response(responseBody, { headers });
     
   } catch (error) {
     console.error('Database error:', error);
     
     const errorPayload = { 
       ticks: [], 
+      compressed: false,
+      incremental: false,
       dailyStats: [], 
       metadata: {
         todayStart: getLocalStartOfDay(),
@@ -128,7 +198,10 @@ export const GET: RequestHandler = async (event) => {
         oldestTick: null,
         newestTick: null,
         retentionHours: 26,
-        serverTime: Date.now()
+        serverTime: Date.now(),
+        baseTime: null,
+        sampled: false,
+        originalCount: 0
       }
     };
     
