@@ -280,10 +280,9 @@
     }
   }
 
- // Replace your existing tick() function with this:
+// Replace your tick() function with this:
 async function tick() {
   try {
-    // Just fetch from your server - no database saving needed!
     const response = await fetch('/api/current');
     const data = await response.json();
     
@@ -296,7 +295,11 @@ async function tick() {
     error.set(null);
     lastUpdate.set(Date.now());
 
-    // NO DATABASE SAVING - server handles it!
+    // ✅ ADD THIS: Update history store for UI calculations
+    const nowTs = Date.now();
+    const currentCount = data.progression.signatureCount;
+    
+    history.update(h => [...h, { ts: nowTs, count: currentCount }]);
     
   } catch (e) {
     error.set((e as Error).message);
