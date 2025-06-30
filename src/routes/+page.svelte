@@ -48,7 +48,6 @@
   const error = writable<string | null>(null);
   const lastUpdate = writable<number>(0);
   const history = writable<Tick[]>([]);
-  const metadata = writable<any>({});
 
   const rate = derived(history, $h => {
     const now = Date.now();
@@ -93,32 +92,9 @@
     };
   });
 
-  const todayData = derived([history, metadata], ([$h, $meta]) => {
+  const todayData = derived(history, $h => {
     const start = getLocalStartOfDay();
     const todayTicks = $h.filter(t => t.ts >= start).sort((a, b) => a.ts - b.ts);
-
-    // Calculate stable data points count using server metadata as baseline
-    let stableDataPointsToday = todayTicks.length; // fallback to current method
-    
-    if ($meta.todayStart && $meta.newestTick) {
-      // Get baseline count from server data (todayStart to newestTick)
-      const baselineTicks = $h.filter(t => 
-        t.ts >= $meta.todayStart && t.ts <= $meta.newestTick
-      );
-      
-      // Add any new ticks that came after the server's newestTick
-      const newTicks = $h.filter(t => t.ts > $meta.newestTick);
-      
-      stableDataPointsToday = baselineTicks.length + newTicks.length;
-      
-      console.log('Stable counting:', {
-        todayStart: $meta.todayStart,
-        newestTick: $meta.newestTick,
-        baselineTicks: baselineTicks.length,
-        newTicks: newTicks.length,
-        total: stableDataPointsToday
-      });
-    }
 
     const baselineKnown = todayTicks.length > 0;
     if (!baselineKnown) {
@@ -128,7 +104,7 @@
         utcStartOfDay: start,
         timeUntilResetText: `${Math.floor(msUntilReset / 3_600_000)}h ${Math.floor((msUntilReset % 3_600_000) / 60_000)}m`,
         baselineKnown: false,
-        dataPointsToday: stableDataPointsToday
+        dataPointsToday: 0
       };
     }
 
@@ -145,7 +121,7 @@
       utcStartOfDay: start,
       timeUntilResetText: `${hrs}h ${mins}m`,
       baselineKnown: true,
-      dataPointsToday: stableDataPointsToday
+      dataPointsToday: todayTicks.length
     };
   });
 
@@ -241,9 +217,7 @@
         const data = await res.json();
         if (Array.isArray(data.ticks)) {
           history.set(data.ticks);
-          // Store the metadata for stable counting
           if (data.metadata) {
-            metadata.set(data.metadata);
             console.log('Tick history metadata:', data.metadata);
           }
         } else {
