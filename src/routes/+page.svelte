@@ -280,32 +280,29 @@
     }
   }
 
-  async function tick() {
-    try {
-      const [progRes, infoRes] = await Promise.all([
-        fetch('https://eci.ec.europa.eu/045/public/api/report/progression'),
-        fetch('https://eci.ec.europa.eu/045/public/api/initiative/description')
-      ]);
-      
-      const prog = await progRes.json();
-      const info = await infoRes.json();
-
-      progression.set({ signatureCount: prog.signatureCount, goal: prog.goal });
-      initiative.set({
-        registrationDate: info.initiativeInfo.registrationDate,
-        closingDate: info.initiativeInfo.closingDate
-      });
-      error.set(null);
-      lastUpdate.set(Date.now());
-
-      const nowTs = Date.now();
-      await saveTickToServer(nowTs, prog.signatureCount);
-      history.update(h => [...h, { ts: nowTs, count: prog.signatureCount }]);
-    } catch (e) {
-      error.set((e as Error).message);
-      console.error('Tick error:', e);
+ // Replace your existing tick() function with this:
+async function tick() {
+  try {
+    // Just fetch from your server - no database saving needed!
+    const response = await fetch('/api/current');
+    const data = await response.json();
+    
+    if (data.error && !data.progression) {
+      throw new Error(data.error);
     }
+    
+    progression.set(data.progression);
+    initiative.set(data.initiative);
+    error.set(null);
+    lastUpdate.set(Date.now());
+
+    // NO DATABASE SAVING - server handles it!
+    
+  } catch (e) {
+    error.set((e as Error).message);
+    console.error('Tick error:', e);
   }
+}
 
   function getConfidenceIndicator(dp: number, type: keyof typeof CONFIDENCE_THRESHOLDS) {
     const threshold = CONFIDENCE_THRESHOLDS[type];
