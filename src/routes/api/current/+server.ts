@@ -71,6 +71,8 @@ export const GET: RequestHandler = async () => {
   }
 };
 
+// Update your /api/current/+server.ts - modify the fetchAndSave function:
+
 async function fetchAndSave() {
   try {
     console.log('[Server] Fetching from EU APIs...');
@@ -90,12 +92,9 @@ async function fetchAndSave() {
     const now = Date.now();
     const currentCount = prog.signatureCount;
     
-    // SAVE TO DATABASE (only when count changes)
-    if (lastSavedCount !== currentCount) {
-      await saveToDatabase(now, currentCount);
-      lastSavedCount = currentCount;
-      console.log(`[Server] Saved: ${currentCount} signatures`);
-    }
+    // ✅ ALWAYS SAVE TO DATABASE (every fetch, not just on count changes)
+    await saveToDatabase(now, currentCount);
+    console.log(`[Server] Saved: ${currentCount} signatures at ${new Date(now).toISOString()}`);
     
     cachedData = {
       progression: { 
